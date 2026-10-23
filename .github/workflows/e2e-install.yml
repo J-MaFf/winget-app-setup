@@ -64,19 +64,27 @@ name: E2E Install
 # Which installer runs (INSTALLER_SOURCE), and how (e2e/Invoke-InstallPass.ps1 starts every pass):
 #   - schedule: the TRUE production path - the readme's one-liner, fetched from raw main and piped
 #     to iex in a fresh process, in both passes, exactly as every helpdesk run gets it.
-#   - pull_request and workflow_dispatch: the CHECKOUT's winget-app-install.ps1 (the PR's merge
-#     commit, or the branch the run was dispatched on). main is production - the one-liner
-#     downloads it directly - so this is the only un-mocked run a change gets before it reaches
-#     users, and any branch can be tested on demand with
+#   - workflow_dispatch with installer_source raw-main: that same one-liner, on demand.
+#   - workflow_dispatch with installer_source release (#289): the one-liner with a release's URL
+#     (the latest release, or release_tag), the way it will read once the readme points at
+#     releases. Under Windows PowerShell the bootstrap downloads that release again for its
+#     PowerShell 7 relaunch, by the build's version, with no shim. e2e/Save-ReleaseInstaller.ps1
+#     saves the release's installer first, which stops the job when the release has none, and the
+#     assertions check every transcript for its build id. The uninstall pass still runs the
+#     checkout's uninstaller.
+#   - pull_request and workflow_dispatch (installer_source checkout, the default): the CHECKOUT's
+#     winget-app-install.ps1 (the PR's merge commit, or the branch the run was dispatched on).
+#     main is production - the one-liner downloads it directly - so this is the only un-mocked
+#     run a change gets before it reaches users, and any branch can be tested on demand with
 #     'gh workflow run e2e-install.yml --ref <branch>'. The two passes use the two documented
 #     entry points: the first pipes the file to iex the way the one-liner runs (from memory, no
 #     file path), the second runs it with -File the way a clone, RMM or CI run does (which sets
 #     $PSCommandPath for the abort guard in build/fragments/tail.ps1). Under Windows PowerShell
-#     the bootstrap of an iex run downloads the installer again from raw main for its PowerShell 7
-#     relaunch; Invoke-InstallPass.ps1 answers that one download with the checkout, so the
-#     PowerShell 7 half of the pass tests the change too. e2e/Assert-Install.ps1 -InstallerPath
-#     then checks that every transcript, the 5.1 bootstrap ones included, logged the checkout's
-#     build id.
+#     the bootstrap of an iex run downloads the installer again for its PowerShell 7 relaunch
+#     (the release of its version, then raw main); Invoke-InstallPass.ps1 answers those downloads
+#     with the checkout, so the PowerShell 7 half of the pass tests the change too.
+#     e2e/Assert-Install.ps1 -InstallerPath then checks that every transcript, the 5.1 bootstrap
+#     ones included, logged the checkout's build id.
 #
 # Winget-AutoUpdate: windows-latest ships without the Microsoft.WindowsAppRuntime.1.8 framework
 # that WAU's winget updates need. The installer now installs a pinned, verified copy of it for all
@@ -128,6 +136,18 @@ on:
         description: 'SYSTEM leg: first run a pass whose time budget is already used up, and check it exits 9 with every app not attempted (wgt-gq8.49)'
         type: boolean
         default: false
+      installer_source:
+        description: 'What the PowerShell 7, Windows PowerShell 5.1 and ARM64 account legs run: the checkout, the one-liner from raw main, or the one-liner from a release (#289). The SYSTEM legs always run the checkout.'
+        type: choice
+        options:
+          - checkout
+          - raw-main
+          - release
+        default: checkout
+      release_tag:
+        description: 'With installer_source release: the tag (vX.Y.Z), or empty for the latest release'
+        type: string
+        default: ''
   pull_request: # every PR; the changes job decides whether it needs the real install
 
 permissions:
@@ -226,8 +246,9 @@ jobs:
     # ships a corrected Server 2025 image, or a viable pinned alternative is found.
     runs-on: windows-latest
     # Backstop. The long steps have their own timeout-minutes, which add up to less than this
-    # (15 + 3 + 35 + 3 + 35 + 40 + 5 + 45 + 5 = 186, plus checkout and uploads), so a hung pass fails at its
-    # own limit and the diagnostics and upload steps still run. A job that reaches this limit is
+    # (3 + 15 + 3 + 35 + 3 + 35 + 40 + 5 + 45 + 5 = 189, plus checkout and uploads; the first 3 is
+    # the release download, in release runs only), so a hung pass fails at its own limit and the
+    # diagnostics and upload steps still run. A job that reaches this limit is
     # cancelled instead; report-failure still files the issue. Each step limit sits above that
     # step's slow red-run path, so it ends with its own summary instead of being cut off:
     #   - runner preparation, 15: uninstalling three apps takes a minute or two. Every winget
@@ -251,13 +272,22 @@ jobs:
     #     diagnostics upload.
     timeout-minutes: 195
     env:
-      # What both install passes run: 'raw-main' (the production one-liner) only for the weekly run,
-      # 'checkout' for pull requests and dispatched runs (piped to iex, then run with -File). See
-      # the header comment.
-      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
+      # What both install passes run: 'raw-main' (the production one-liner) for the weekly run,
+      # 'checkout' for pull requests and dispatched runs (piped to iex, then run with -File), or
+      # what a dispatch chose (installer_source; release_tag for 'release'). See the header comment.
+      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || inputs.installer_source || 'checkout' }}
+      INSTALLER_RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      # Release runs (#289): the release's installer, whose build id the assertions look for; a
+      # release without one stops the job here, before anything is installed.
+      - name: Save the release under test
+        if: ${{ env.INSTALLER_SOURCE == 'release' }}
+        shell: pwsh
+        timeout-minutes: 3
+        run: ./e2e/Save-ReleaseInstaller.ps1 -OutputPath (Join-Path $env:RUNNER_TEMP 'release-installer\winget-app-install.ps1')
 
       # Chrome, 7-Zip and Git come with the runner image; without this the first pass skipped them
       # as already installed and their install paths never ran (review finding P3-40). Runner
@@ -357,9 +387,13 @@ jobs:
             Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
           }
           # Runs that installed the checkout must show its build id in every pass's transcript, so a
-          # run that quietly tested another copy (raw main) fails here. The weekly run fetches raw
-          # main, which can trail the checkout by a few minutes of CDN caching, so it is not checked.
-          if ($env:INSTALLER_SOURCE -ne 'raw-main') {
+          # run that quietly tested another copy (raw main) fails here; release runs, the saved
+          # release's. The weekly run fetches raw main, which can trail the checkout by a few
+          # minutes of CDN caching, so it is not checked.
+          if ($env:INSTALLER_SOURCE -eq 'release') {
+            $assertArgs += @('-InstallerPath', (Join-Path $env:RUNNER_TEMP 'release-installer\winget-app-install.ps1'))
+          }
+          elseif ($env:INSTALLER_SOURCE -ne 'raw-main') {
             $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
           }
           $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
@@ -438,14 +472,24 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
     runs-on: windows-latest
-    # Backstop, sized like e2e-install's: 20 + 3 + 35 + 3 + 35 + 40 + 5 = 141, plus checkout and
-    # uploads. Installing PowerShell 7 adds a minute or two to the first pass.
+    # Backstop, sized like e2e-install's: 3 + 21 + 3 + 35 + 3 + 35 + 40 + 5 = 145, plus checkout and
+    # uploads (the first 3: the release download, in release runs only). Installing PowerShell 7
+    # adds a minute or two to the first pass.
     timeout-minutes: 150
     env:
-      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
+      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || inputs.installer_source || 'checkout' }}
+      INSTALLER_RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      # Release runs (#289): the release's installer, whose build id the assertions look for; a
+      # release without one stops the job here, before anything is installed.
+      - name: Save the release under test
+        if: ${{ env.INSTALLER_SOURCE == 'release' }}
+        shell: powershell
+        timeout-minutes: 3
+        run: .\e2e\Save-ReleaseInstaller.ps1 -OutputPath (Join-Path $env:RUNNER_TEMP 'release-installer\winget-app-install.ps1')
 
       # As in e2e-install, plus PowerShell 7 (MSI uninstall, winget as the fallback). If it cannot
       # be removed, a warning says so, the first pass finds it instead of installing it, and the
@@ -473,8 +517,8 @@ jobs:
         id: first-pass
         shell: powershell
         timeout-minutes: 35
-        # The one-liner in a fresh Windows PowerShell: raw main for the weekly run, the checkout
-        # piped to iex otherwise. Same exit-code policy as e2e-install; the exit code is the one
+        # The one-liner in a fresh Windows PowerShell: raw main for the weekly run, a release's for
+        # a release run, the checkout piped to iex otherwise. Same exit-code policy as e2e-install; the exit code is the one
         # the bootstrap passes on from the PowerShell 7 run.
         run: |
           & .\e2e\Invoke-InstallPass.ps1 -Pass first -Shell powershell -Entry OneLiner -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-first.json')
@@ -524,7 +568,10 @@ jobs:
           else {
             Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
           }
-          if ($env:INSTALLER_SOURCE -ne 'raw-main') {
+          if ($env:INSTALLER_SOURCE -eq 'release') {
+            $assertArgs += @('-InstallerPath', (Join-Path $env:RUNNER_TEMP 'release-installer\winget-app-install.ps1'))
+          }
+          elseif ($env:INSTALLER_SOURCE -ne 'raw-main') {
             $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
           }
           $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
@@ -592,15 +639,25 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
     runs-on: windows-11-arm
-    # Backstop: 3 + 3 + 45 + 3 + 45 + 40 + 5 = 144, plus checkout and uploads. The passes get 45
-    # minutes instead of 35: the first one sets winget up for the account before it installs, and
-    # the x64 and x86 installers run emulated.
+    # Backstop: 3 + 3 + 3 + 45 + 3 + 45 + 40 + 5 = 147, plus checkout and uploads (the first 3: the
+    # release download, in release runs only). The passes get 45 minutes instead of 35: the first
+    # one sets winget up for the account before it installs, and the x64 and x86 installers run
+    # emulated.
     timeout-minutes: 160
     env:
-      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
+      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || inputs.installer_source || 'checkout' }}
+      INSTALLER_RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      # Release runs (#289): the release's installer, whose build id the assertions look for; a
+      # release without one stops the job here, before anything is installed.
+      - name: Save the release under test
+        if: ${{ env.INSTALLER_SOURCE == 'release' }}
+        shell: pwsh
+        timeout-minutes: 3
+        run: ./e2e/Save-ReleaseInstaller.ps1 -OutputPath (Join-Path $env:RUNNER_TEMP 'release-installer\winget-app-install.ps1')
 
       # No runner preparation: its winget.exe calls left the account with a working winget, so the
       # installer's own ladder never ran (wgt-gq8.50). This step runs no winget; it only shows
@@ -667,7 +724,10 @@ jobs:
           else {
             Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
           }
-          if ($env:INSTALLER_SOURCE -ne 'raw-main') {
+          if ($env:INSTALLER_SOURCE -eq 'release') {
+            $assertArgs += @('-InstallerPath', (Join-Path $env:RUNNER_TEMP 'release-installer\winget-app-install.ps1'))
+          }
+          elseif ($env:INSTALLER_SOURCE -ne 'raw-main') {
             $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
           }
           $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
@@ -1000,6 +1060,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EVENT_NAME: ${{ github.event_name }}
           TESTED_SHA: ${{ github.sha }}
+          INSTALLER_SOURCE: ${{ inputs.installer_source }}
+          INSTALLER_RELEASE_TAG: ${{ inputs.release_tag }}
           PWSH_LEG_RESULT: ${{ needs.e2e-install.result }}
           WINDOWS_POWERSHELL_LEG_RESULT: ${{ needs.e2e-install-windows-powershell.result }}
           ARM64_LEG_RESULT: ${{ needs.e2e-install-arm64.result }}
@@ -1155,8 +1217,10 @@ jobs:
             echo
             echo "- Run: $RUN_URL (attempt $RUN_ATTEMPT)"
             echo "- Trigger: \`$EVENT_NAME\`"
-            if [ "$EVENT_NAME" = 'schedule' ]; then
+            if [ "$EVENT_NAME" = 'schedule' ] || [ "$INSTALLER_SOURCE" = 'raw-main' ]; then
               echo "- Installer: the production one-liner, fetched from raw \`main\`"
+            elif [ "$INSTALLER_SOURCE" = 'release' ]; then
+              echo "- Installer: the release one-liner, ${INSTALLER_RELEASE_TAG:-the latest release} (the SYSTEM legs ran the checkout of \`main\` at $TESTED_SHA)"
             else
               echo "- Installer: the checkout of \`main\` at $TESTED_SHA"
             fi

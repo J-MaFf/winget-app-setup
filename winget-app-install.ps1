@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+dd9c56e7 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+303e31d9 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+dd9c56e7'
+$script:InstallerBuildId = '1.0.0+303e31d9'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -5183,6 +5183,42 @@ function Get-InstallerBuildIdFromText {
     return $null
 }
 
+function Get-InstallerDownloadUrl {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$BuildId
+    )
+
+    $urls = @()
+    if ($BuildId -match '^(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))\+') {
+        $tag = 'v' + $Matches.version
+        $urls += 'https://github.com/J-MaFf/winget-app-setup/releases/download/{0}/winget-app-install.ps1' -f $tag
+        $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@{0}/winget-app-install.ps1' -f $tag
+    }
+    $urls += 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
+    $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
+    return $urls
+}
+
+function ConvertTo-DownloadedText {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Content
+    )
+
+    if ($null -eq $Content) {
+        return ''
+    }
+    if ($Content -is [byte[]] -or ($Content -is [object[]] -and $Content.Count -gt 0 -and $Content[0] -is [byte])) {
+        $text = [System.Text.Encoding]::UTF8.GetString([byte[]]$Content)
+    }
+    else {
+        $text = [string]$Content
+    }
+    return $text.TrimStart([char]0xFEFF)
+}
+
 function Get-PowerShell7RelaunchInstaller {
     param (
         [Parameter(Mandatory = $true)]
@@ -5197,19 +5233,19 @@ function Get-PowerShell7RelaunchInstaller {
         Write-Info ('Downloading the installer for the PowerShell 7 relaunch from {0}...' -f $candidateUrl)
         $installerText = $null
         try {
-            $installerText = [string](Invoke-RestMethod -Uri $candidateUrl -TimeoutSec $TimeoutSeconds)
+            $installerText = ConvertTo-DownloadedText -Content (Invoke-RestMethod -Uri $candidateUrl -TimeoutSec $TimeoutSeconds)
         }
         catch {
-            Write-WarningMessage ('  The download failed: {0}' -f $_)
+            Write-Info ('  The download failed: {0}' -f $_)
             continue
         }
         $downloadedBuildId = Get-InstallerBuildIdFromText -Text $installerText
         if (-not $downloadedBuildId) {
-            Write-WarningMessage '  That download is not the installer: it carries no installer build id.'
+            Write-Info '  That download is not the installer: it carries no installer build id.'
             continue
         }
         if ($ExpectedBuildId -and $downloadedBuildId -ne $ExpectedBuildId) {
-            Write-WarningMessage ('  That is installer build {0}, not build {1} that this run started with, so it is not used.' -f $downloadedBuildId, $ExpectedBuildId)
+            Write-Info ('  That is installer build {0}, not build {1} that this run started with, so it is not used.' -f $downloadedBuildId, $ExpectedBuildId)
             continue
         }
         return $installerText
@@ -5241,10 +5277,10 @@ function Get-PowerShell7RelaunchFile {
             Write-ErrorMessage 'Could not download the installer for the relaunch (see above).'
         }
         if ($PowerShell7Installed) {
-            Write-ErrorMessage 'PowerShell 7 is installed on this machine. Open PowerShell 7 (pwsh) as administrator and run the same one-liner there: it needs no second download. If raw.githubusercontent.com answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
+            Write-ErrorMessage 'PowerShell 7 is installed on this machine. Open PowerShell 7 (pwsh) as administrator and run the same one-liner there: it needs no second download. If GitHub answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
         }
         else {
-            Write-ErrorMessage 'Open Windows PowerShell as administrator and run the same one-liner there. If raw.githubusercontent.com answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
+            Write-ErrorMessage 'Open Windows PowerShell as administrator and run the same one-liner there. If GitHub answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
         }
         return $null
     }
@@ -5321,10 +5357,7 @@ function Invoke-PowerShell7Bootstrap {
         [Parameter(Mandatory = $false)]
         [string]$CommandPath,
         [Parameter(Mandatory = $false)]
-        [string[]]$InstallerUrl = @(
-            'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1',
-            'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
-        ),
+        [string[]]$InstallerUrl = @(),
         [Parameter(Mandatory = $false)]
         [string]$ExpectedBuildId,
         [Parameter(Mandatory = $false)]
@@ -5335,6 +5368,9 @@ function Invoke-PowerShell7Bootstrap {
     )
 
     $script:PowerShell7BootstrapRelaunched = $false
+    if ($InstallerUrl.Count -eq 0) {
+        $InstallerUrl = @(Get-InstallerDownloadUrl -BuildId $ExpectedBuildId)
+    }
 
     Write-WarningMessage 'This installer requires PowerShell 7+ (pwsh), but this session is Windows PowerShell. Handing off...'
 

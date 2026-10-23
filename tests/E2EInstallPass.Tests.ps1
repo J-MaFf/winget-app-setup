@@ -226,6 +226,36 @@ Describe 'Get-InstallPassCommand' {
     It 'Treats an empty or unknown source as the checkout' {
         (Get-InstallPassCommand -Shell 'pwsh' -Entry 'OneLiner' -Source '' -InstallerPath $script:Installer).Description | Should -Match '^the checkout'
     }
+
+    It 'Runs the release one-liner for a release run, in <Shell> with -Entry <Entry> and tag ''<Tag>'' (#289)' -ForEach @(
+        @{ Shell = 'pwsh'; Entry = 'OneLiner'; Tag = ''; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/latest/download/winget-app-install.ps1'; Name = 'the latest release' }
+        @{ Shell = 'pwsh'; Entry = 'File'; Tag = 'v2.0.0'; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/download/v2.0.0/winget-app-install.ps1'; Name = 'release v2.0.0' }
+        @{ Shell = 'powershell'; Entry = 'OneLiner'; Tag = ''; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/latest/download/winget-app-install.ps1'; Name = 'the latest release' }
+        @{ Shell = 'powershell'; Entry = 'File'; Tag = 'v2.1.0-rc.1'; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/download/v2.1.0-rc.1/winget-app-install.ps1'; Name = 'release v2.1.0-rc.1' }
+    ) {
+        $command = Get-InstallPassCommand -Shell $Shell -Entry $Entry -Source 'release' -ReleaseTag $Tag -InstallerPath $script:Installer
+
+        $command.FilePath | Should -Be $Shell
+        $command.Arguments[0..3] | Should -Be @('-NoProfile', '-OutputFormat', 'Text', '-EncodedCommand')
+        ConvertFrom-EncodedArgument -Arguments $command.Arguments | Should -Be $command.Script
+        # The readme's one-liner with the release's URL in place of raw main's: switching the readme
+        # to releases changes only the URL.
+        $readme = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'readme.md')
+        $rawUrl = 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
+        $readmeOneLiner = 'Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "' + $rawUrl + '" | iex'
+        $readme.Contains($readmeOneLiner) | Should -BeTrue
+        $command.Script | Should -BeExactly $readmeOneLiner.Replace($rawUrl, $Url)
+        # No shim: the Windows PowerShell bootstrap's relaunch downloads the release itself.
+        $command.Script | Should -Not -Match 'Invoke-RestMethod'
+        $command.Description | Should -Be "$Name (the release one-liner) in $(if ($Shell -eq 'pwsh') { 'PowerShell 7' } else { 'Windows PowerShell' })"
+    }
+
+    It 'Names the asset the release workflow publishes' {
+        $release = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/release.yml')
+
+        $release | Should -Match '(?m)^\s+files: \|\s*\r?\n\s+winget-app-install\.ps1\s*$'
+        Get-ReleaseInstallerUrl -Tag '' | Should -Match '/releases/latest/download/winget-app-install\.ps1$'
+    }
 }
 
 Describe 'The checkout relaunch shim' {
@@ -234,11 +264,18 @@ Describe 'The checkout relaunch shim' {
         # the installer from raw main by URL. It records what it got, and a call to another URL
         # must reach the real cmdlet (a refused connection, not the checkout's text).
         $resultPath = Join-Path $TestDrive 'shim-result.txt'
+        # Every URL Get-InstallerDownloadUrl gives, a ref of raw other than main, and the release
+        # one-liner's own.
         $body = @"
 `$fetched = Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1' -TimeoutSec 60
 `$otherRef = Invoke-RestMethod 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1'
+`$release = Invoke-RestMethod -Uri 'https://github.com/J-MaFf/winget-app-setup/releases/download/v2.0.0/winget-app-install.ps1' -TimeoutSec 60
+`$latest = Invoke-RestMethod -Uri 'https://github.com/J-MaFf/winget-app-setup/releases/latest/download/winget-app-install.ps1'
+`$releaseMirror = Invoke-RestMethod -Uri 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@v2.0.0/winget-app-install.ps1' -TimeoutSec 60
+`$mainMirror = Invoke-RestMethod -Uri 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1' -TimeoutSec 60
 try { Invoke-RestMethod -Uri 'http://127.0.0.1:9/' -TimeoutSec 5; `$other = 'served' } catch { `$other = 'real cmdlet' }
-Set-Content -LiteralPath '$resultPath' -Value @(`$fetched.Length, `$otherRef.Length, `$other)
+try { Invoke-RestMethod -Uri 'http://127.0.0.1:9/J-MaFf/winget-app-setup/releases/download/v2.0.0/winget-app-install.ps1' -TimeoutSec 5; `$lookalike = 'served' } catch { `$lookalike = 'real cmdlet' }
+Set-Content -LiteralPath '$resultPath' -Value @(`$fetched.Length, `$otherRef.Length, `$release.Length, `$latest.Length, `$releaseMirror.Length, `$mainMirror.Length, `$other, `$lookalike)
 "@
         $installer = New-StandInInstaller -Body $body
         $command = Get-InstallPassCommand -Shell 'powershell' -Entry 'OneLiner' -Source 'checkout' -InstallerPath $installer
@@ -246,7 +283,7 @@ Set-Content -LiteralPath '$resultPath' -Value @(`$fetched.Length, `$otherRef.Len
         $null = & $script:Pwsh -NoProfile -EncodedCommand ([Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($command.Script))) 2>&1
 
         $expectedLength = (Get-Content -Raw -Encoding UTF8 -LiteralPath $installer).Length
-        Get-Content -LiteralPath $resultPath | Should -Be @("$expectedLength", "$expectedLength", 'real cmdlet')
+        Get-Content -LiteralPath $resultPath | Should -Be @("$expectedLength", "$expectedLength", "$expectedLength", "$expectedLength", "$expectedLength", "$expectedLength", 'real cmdlet', 'real cmdlet')
     }
 }
 
@@ -314,6 +351,17 @@ Describe 'e2e/Invoke-InstallPass.ps1 run as a step' {
     It 'Exits 64 without a pass, shell and entry' {
         $null = & $script:Pwsh -NoProfile -File $script:InstallPassScript 2>&1
         $LASTEXITCODE | Should -Be 64
+    }
+
+    It 'Exits 64 for a release run whose tag is not one the release workflow publishes: <Tag>' -ForEach @(
+        @{ Tag = 'latest' }
+        @{ Tag = '2.0.0' }
+        @{ Tag = 'v2.0' }
+        @{ Tag = 'v2.0.0 ; Remove-Item' }
+    ) {
+        $output = & $script:Pwsh -NoProfile -File $script:InstallPassScript -Pass first -Shell pwsh -Entry OneLiner -Source release -ReleaseTag $Tag 2>&1
+        $LASTEXITCODE | Should -Be 64
+        ($output -join "`n") | Should -Match '-ReleaseTag must be vMAJOR\.MINOR\.PATCH'
     }
 }
 
@@ -386,6 +434,7 @@ Describe 'The applicability record taken before each pass' {
 Describe 'e2e scripts run by Windows PowerShell 5.1' {
     It 'Stays runnable by Windows PowerShell 5.1: <Name> is ASCII only, parses cleanly, no PowerShell 7-only operators' -ForEach @(
         @{ Name = 'e2e/Invoke-InstallPass.ps1' }
+        @{ Name = 'e2e/Save-ReleaseInstaller.ps1' }
         @{ Name = 'e2e/Remove-PreinstalledApps.ps1' }
         @{ Name = 'e2e/TranscriptAssertions.ps1' }
         @{ Name = 'e2e/Invoke-SystemInstallPass.ps1' }
@@ -400,6 +449,66 @@ Describe 'e2e scripts run by Windows PowerShell 5.1' {
         $parseErrors | Should -BeNullOrEmpty
         $ps7OnlyKinds = @('QuestionQuestion', 'QuestionQuestionEquals', 'QuestionDot', 'QuestionLBracket', 'AndAnd', 'OrOr', 'QuestionMark')
         @($tokens | Where-Object { $ps7OnlyKinds -contains $_.Kind.ToString() } | ForEach-Object { "$($_.Kind) at line $($_.Extent.StartLineNumber)" }) | Should -BeNullOrEmpty
+    }
+}
+
+# #289: a dispatched run can test the one-liner from a release, the way it will read once the
+# readme points at releases.
+Describe 'Release runs of .github/workflows/e2e-install.yml (#289)' {
+    BeforeAll {
+        $script:Workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+        function Get-WorkflowJob {
+            param ([string]$Name)
+            $start = $script:Workflow.IndexOf("`n  ${Name}:")
+            $next = [regex]::Match($script:Workflow.Substring($start + 1), '\n  [a-z0-9-]+:[ \t]*\r?\n')
+            if (-not $next.Success) {
+                return $script:Workflow.Substring($start)
+            }
+            return $script:Workflow.Substring($start, $next.Index + 1)
+        }
+    }
+
+    It 'Takes installer_source (checkout by default, raw-main or release) and release_tag on dispatch' {
+        $dispatch = [regex]::Match($script:Workflow, '(?ms)^  workflow_dispatch:\s*\r?\n(.*?)(?=^  [a-z_]+:)').Groups[1].Value
+
+        $dispatch | Should -Match '(?ms)      installer_source:\s+description: [^\r\n]+\s+type: choice\s+options:\s+- checkout\s+- raw-main\s+- release\s+default: checkout'
+        $dispatch | Should -Match "(?ms)      release_tag:\s+description: [^\r\n]+\s+type: string\s+default: ''"
+    }
+
+    It 'Runs what the dispatch chose in <Job>, saves the release first and checks its build id' -ForEach @(
+        @{ Job = 'e2e-install'; Shell = 'pwsh'; Script = './e2e/Save-ReleaseInstaller.ps1' }
+        @{ Job = 'e2e-install-windows-powershell'; Shell = 'powershell'; Script = '.\e2e\Save-ReleaseInstaller.ps1' }
+        @{ Job = 'e2e-install-arm64'; Shell = 'pwsh'; Script = './e2e/Save-ReleaseInstaller.ps1' }
+    ) {
+        $job = Get-WorkflowJob -Name $Job
+
+        $job | Should -Match ([regex]::Escape("      INSTALLER_SOURCE: `${{ github.event_name == 'schedule' && 'raw-main' || inputs.installer_source || 'checkout' }}"))
+        $job | Should -Match ([regex]::Escape('      INSTALLER_RELEASE_TAG: ${{ inputs.release_tag }}'))
+        $save = [regex]::Match($job, '(?ms)      - name: Save the release under test\s*\r?\n.*?(?=\r?\n\s*\r?\n)').Value
+        $save | Should -Match ([regex]::Escape("if: `${{ env.INSTALLER_SOURCE == 'release' }}"))
+        $save | Should -Match "shell: $Shell\b"
+        $save | Should -Match ([regex]::Escape("run: $Script -OutputPath (Join-Path `$env:RUNNER_TEMP 'release-installer\winget-app-install.ps1')"))
+        $job.IndexOf('Save the release under test') | Should -BeLessThan $job.IndexOf('First install pass')
+        $job | Should -Match "(?ms)if \(\`$env:INSTALLER_SOURCE -eq 'release'\) \{\s+\`$assertArgs \+= @\('-InstallerPath', \(Join-Path \`$env:RUNNER_TEMP 'release-installer\\winget-app-install\.ps1'\)\)\s+\}\s+elseif \(\`$env:INSTALLER_SOURCE -ne 'raw-main'\) \{\s+\`$assertArgs \+= @\('-InstallerPath', \(Join-Path \`$env:GITHUB_WORKSPACE 'winget-app-install\.ps1'\)\)"
+    }
+
+    It 'Leaves the SYSTEM legs on the checkout' -ForEach @(
+        @{ Job = 'e2e-install-system' }
+        @{ Job = 'e2e-install-system-winget-client' }
+        @{ Job = 'e2e-install-system-arm64' }
+    ) {
+        $job = Get-WorkflowJob -Name $Job
+
+        $job | Should -Not -Match 'INSTALLER_SOURCE|installer_source|Save-ReleaseInstaller'
+    }
+
+    It 'Names the release in the failure issue of a release run' {
+        $report = Get-WorkflowJob -Name 'report-failure'
+
+        $report | Should -Match ([regex]::Escape('INSTALLER_SOURCE: ${{ inputs.installer_source }}'))
+        $report | Should -Match ([regex]::Escape('INSTALLER_RELEASE_TAG: ${{ inputs.release_tag }}'))
+        $report | Should -Match ([regex]::Escape('elif [ "$INSTALLER_SOURCE" = ''release'' ]; then'))
+        $report | Should -Match ([regex]::Escape('${INSTALLER_RELEASE_TAG:-the latest release}'))
     }
 }
 

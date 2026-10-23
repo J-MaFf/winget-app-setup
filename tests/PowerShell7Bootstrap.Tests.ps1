@@ -1394,6 +1394,8 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             }
             $script:runningBuildId = '1.0.0+aaaaaaaa'
             $script:otherBuildId = '1.0.0+bbbbbbbb'
+            $script:releaseUrl = 'https://github.com/J-MaFf/winget-app-setup/releases/download/v1.0.0/winget-app-install.ps1'
+            $script:releaseMirrorUrl = 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@v1.0.0/winget-app-install.ps1'
             $script:rawUrl = 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
             $script:jsDelivrUrl = 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
         }
@@ -1477,20 +1479,78 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'PowerShell 7 is installed on this machine\. Open PowerShell 7 \(pwsh\) as administrator and run the same one-liner there' }
         }
 
-        Context 'Same build, from raw or its jsDelivr mirror (review finding P2-18)' {
-            It 'Tries raw.githubusercontent.com first, then the jsDelivr mirror the readme offers' {
-                Mock Invoke-RestMethod { throw '429: Too Many Requests' }
+        Context 'Same build, from its release, raw main or their jsDelivr mirrors (review finding P2-18, #289)' {
+            It 'Tries the release of the build''s version and its jsDelivr copy, then raw main and its jsDelivr mirror' {
+                $script:triedUrls = [System.Collections.Generic.List[string]]::new()
+                Mock Invoke-RestMethod { $script:triedUrls.Add($Uri); throw '429: Too Many Requests' }
 
                 Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Out-Null
 
+                Should -Invoke Invoke-RestMethod -Times 4 -Exactly
+                $script:triedUrls | Should -Be @($script:releaseUrl, $script:releaseMirrorUrl, $script:rawUrl, $script:jsDelivrUrl)
+            }
+
+            It 'Relaunches the release''s copy for a run started from the release, whatever main serves now' {
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:releaseUrl }
+
+                $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
+
+                $result | Should -Be 42
+                Should -Invoke Invoke-RestMethod -Times 1 -Exactly
+                Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter { $Value -match [regex]::Escape("'$($script:runningBuildId)'") }
+            }
+
+            It 'Takes the release''s jsDelivr copy when GitHub is rate-limiting the network' {
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId }
+                Mock Invoke-RestMethod { throw 'The remote server returned an error: (429) Too Many Requests.' } -ParameterFilter { $Uri -eq $script:releaseUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:releaseMirrorUrl }
+
+                Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 42
+
                 Should -Invoke Invoke-RestMethod -Times 2 -Exactly
-                Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -eq $script:rawUrl }
-                Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
+                Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter { $Value -match [regex]::Escape("'$($script:runningBuildId)'") }
+            }
+
+            It 'Passes over the release''s copy for a run started from main, and says so as information' {
+                # Every run started from main does this, so it must not read as a problem.
+                Mock Invoke-RestMethod { throw 'The remote server returned an error: (404) Not Found.' } -ParameterFilter { $Uri -eq $script:releaseUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId } -ParameterFilter { $Uri -eq $script:releaseMirrorUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:rawUrl }
+
+                Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 42
+
+                Should -Invoke Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
+                Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match 'The download failed: .*404' }
+                Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match 'installer build 1\.0\.0\+bbbbbbbb, not build 1\.0\.0\+aaaaaaaa' }
+                Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'download|installer build' }
+                Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter { $Value -match [regex]::Escape("'$($script:runningBuildId)'") }
+            }
+
+            It 'Tries only main''s URLs when the running build carries no version' {
+                $script:triedUrls = [System.Collections.Generic.List[string]]::new()
+                Mock Invoke-RestMethod { $script:triedUrls.Add($Uri); throw 'network unreachable' }
+
+                Invoke-PowerShell7Bootstrap -ExpectedBuildId '' | Should -Be 7
+
+                $script:triedUrls | Should -Be @($script:rawUrl, $script:jsDelivrUrl)
+            }
+
+            It 'Relaunches a release asset GitHub served as bytes (application/octet-stream)' {
+                Mock Invoke-RestMethod { , [System.Text.Encoding]::UTF8.GetBytes((New-TestInstallerText -BuildId $script:runningBuildId)) }
+
+                Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 42
+
+                Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter {
+                    # Set-Content's -Value is an array: one string, not the bytes or their numbers.
+                    @($Value).Count -eq 1 -and $Value[0] -is [string] -and $Value[0].StartsWith('<#PSScriptInfo') -and $Value[0] -match [regex]::Escape("'$($script:runningBuildId)'")
+                }
             }
 
             It 'Relaunches from the jsDelivr mirror when raw.githubusercontent.com is rate-limiting the network' {
                 # An office behind one NAT IP throttled by raw: the jsDelivr one-liner got the first
                 # copy, and the relaunch used to go straight back to raw and fail with exit 1.
+                Mock Invoke-RestMethod { throw 'The remote server returned an error: (404) Not Found.' } -ParameterFilter { $Uri -eq $script:releaseUrl -or $Uri -eq $script:releaseMirrorUrl }
                 Mock Invoke-RestMethod { throw 'The remote server returned an error: (429) Too Many Requests.' } -ParameterFilter { $Uri -eq $script:rawUrl }
                 Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
 
@@ -1509,13 +1569,13 @@ Describe 'Invoke-PowerShell7Bootstrap' {
                 $result | Should -Be 7
                 Should -Invoke Set-Content -Times 0
                 Should -Invoke Start-Process -Times 0
-                Should -Invoke Write-WarningMessage -Times 2 -Exactly -ParameterFilter {
+                Should -Invoke Write-Info -Times 4 -Exactly -ParameterFilter {
                     $Message -match 'installer build 1\.0\.0\+bbbbbbbb, not build 1\.0\.0\+aaaaaaaa that this run started with'
                 }
             }
 
             It 'Takes the mirror''s copy when raw already serves a newer build of main' {
-                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId } -ParameterFilter { $Uri -eq $script:rawUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId } -ParameterFilter { $Uri -eq $script:releaseUrl -or $Uri -eq $script:releaseMirrorUrl -or $Uri -eq $script:rawUrl }
                 Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
 
                 $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
@@ -1527,13 +1587,13 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             }
 
             It 'Rejects a download that is not the installer, such as an error page' {
-                Mock Invoke-RestMethod { '<html><body>Sign in to continue</body></html>' } -ParameterFilter { $Uri -eq $script:rawUrl }
-                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
+                Mock Invoke-RestMethod { '<html><body>Sign in to continue</body></html>' } -ParameterFilter { $Uri -eq $script:releaseUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:releaseMirrorUrl }
 
                 $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
 
                 $result | Should -Be 42
-                Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'not the installer: it carries no installer build id' }
+                Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match 'not the installer: it carries no installer build id' }
                 Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter { $Value -notmatch '<html>' }
             }
 
@@ -1547,6 +1607,196 @@ Describe 'Invoke-PowerShell7Bootstrap' {
                 Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not save the installer for the relaunch' }
             }
         }
+    }
+}
+
+Describe 'Get-InstallerDownloadUrl (#289)' {
+    It 'Puts the release of the build''s version and its jsDelivr copy before main and its mirror' {
+        Get-InstallerDownloadUrl -BuildId '2.0.0+1a2b3c4d' | Should -Be @(
+            'https://github.com/J-MaFf/winget-app-setup/releases/download/v2.0.0/winget-app-install.ps1',
+            'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@v2.0.0/winget-app-install.ps1',
+            'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1',
+            'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
+        )
+    }
+
+    It 'Names the release tag the release workflow accepts for the version the build stamps' {
+        # The tag is v<ModuleVersion> (.github/workflows/release.yml), and the build id starts with
+        # ModuleVersion (build/Build-WingetInstallScript.ps1).
+        $manifestVersion = (Import-PowerShellDataFile -LiteralPath (Join-Path $script:RepoRoot 'WingetAppSetup/WingetAppSetup.psd1')).ModuleVersion
+        $installerText = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:InstallerScriptPath
+        $stampedBuildId = Get-InstallerBuildIdFromText -Text $installerText
+
+        $stampedBuildId | Should -BeLike "$manifestVersion+*"
+        (Get-InstallerDownloadUrl -BuildId $stampedBuildId)[0] | Should -Be "https://github.com/J-MaFf/winget-app-setup/releases/download/v$manifestVersion/winget-app-install.ps1"
+    }
+
+    It 'Gives main''s URLs only for a build id without a version: <BuildId>' -ForEach @(
+        @{ BuildId = '' }
+        @{ BuildId = 'dev' }
+        @{ BuildId = '1.0+abc' }
+        @{ BuildId = '01.0.0+abc' }
+        @{ BuildId = '1.0.0' }
+    ) {
+        Get-InstallerDownloadUrl -BuildId $BuildId | Should -Be @(
+            'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1',
+            'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
+        )
+    }
+}
+
+Describe 'ConvertTo-DownloadedText (#289)' {
+    It 'Keeps a download that came back as text' {
+        ConvertTo-DownloadedText -Content "line 1`nline 2" | Should -BeExactly "line 1`nline 2"
+    }
+
+    It 'Reads a download that came back as bytes as UTF-8' {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes("Write-Output 'caf$([char]0xE9)'")
+
+        ConvertTo-DownloadedText -Content $bytes | Should -BeExactly "Write-Output 'caf$([char]0xE9)'"
+    }
+
+    It 'Reads bytes that the pipeline unrolled into an object array' {
+        $bytes = [object[]][System.Text.Encoding]::UTF8.GetBytes('abc')
+
+        ConvertTo-DownloadedText -Content $bytes | Should -BeExactly 'abc'
+    }
+
+    It 'Drops a leading byte order mark, which iex would take as part of the first command' {
+        $withMark = [byte[]](0xEF, 0xBB, 0xBF) + [System.Text.Encoding]::UTF8.GetBytes('Write-Output 1')
+
+        ConvertTo-DownloadedText -Content $withMark | Should -BeExactly 'Write-Output 1'
+        ConvertTo-DownloadedText -Content "$([char]0xFEFF)Write-Output 1" | Should -BeExactly 'Write-Output 1'
+    }
+
+    It 'Returns an empty string for no content' {
+        ConvertTo-DownloadedText -Content $null | Should -BeExactly ''
+    }
+}
+
+Describe 'A release asset served as application/octet-stream, read by a real PowerShell (#289)' {
+    # GitHub serves release assets as application/octet-stream with no charset. Each child process
+    # downloads from a loopback server that answers the same way: pwsh here, and on Windows the
+    # Windows PowerShell 5.1 whose bootstrap downloads the installer for its PowerShell 7 relaunch.
+    BeforeAll {
+        function Invoke-OctetStreamDownload {
+            param (
+                [string]$Executable,
+                [byte[]]$Body,
+                [int]$RequestCount,
+                [string]$Script
+            )
+
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            $process = $null
+            try {
+                $url = 'http://127.0.0.1:{0}/winget-app-install.ps1' -f $listener.LocalEndpoint.Port
+                $command = $Script.Replace('{URL}', $url)
+                $startInfo = [System.Diagnostics.ProcessStartInfo]::new($Executable)
+                $startInfo.Arguments = '-NoProfile -NonInteractive -OutputFormat Text -EncodedCommand ' + [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($command))
+                $startInfo.UseShellExecute = $false
+                $startInfo.RedirectStandardOutput = $true
+                $startInfo.RedirectStandardError = $true
+                $process = [System.Diagnostics.Process]::Start($startInfo)
+                $outputTask = $process.StandardOutput.ReadToEndAsync()
+                $errorTask = $process.StandardError.ReadToEndAsync()
+                $deadline = [DateTime]::UtcNow.AddSeconds(90)
+                $header = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/octet-stream`r`nContent-Length: $($Body.Length)`r`nConnection: close`r`n`r`n")
+                for ($served = 0; $served -lt $RequestCount; $served++) {
+                    $acceptTask = $listener.AcceptTcpClientAsync()
+                    while (-not $acceptTask.Wait(250)) {
+                        if ($process.HasExited -or [DateTime]::UtcNow -gt $deadline) {
+                            break
+                        }
+                    }
+                    if (-not $acceptTask.IsCompleted) {
+                        break
+                    }
+                    $client = $acceptTask.Result
+                    try {
+                        $stream = $client.GetStream()
+                        $buffer = New-Object byte[] 4096
+                        $request = ''
+                        while ($request -notmatch "`r`n`r`n") {
+                            $read = $stream.Read($buffer, 0, $buffer.Length)
+                            if ($read -le 0) {
+                                break
+                            }
+                            $request += [System.Text.Encoding]::ASCII.GetString($buffer, 0, $read)
+                        }
+                        $stream.Write($header, 0, $header.Length)
+                        $stream.Write($Body, 0, $Body.Length)
+                        $stream.Flush()
+                    }
+                    finally {
+                        $client.Close()
+                    }
+                }
+                if (-not $process.WaitForExit(60000)) {
+                    $process.Kill()
+                    throw "$Executable did not finish within 60 seconds."
+                }
+                return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $outputTask.Result; Error = $errorTask.Result; Served = $served }
+            }
+            finally {
+                $listener.Stop()
+                if ($process) {
+                    $process.Dispose()
+                }
+            }
+        }
+
+        $script:installerBytes = [System.IO.File]::ReadAllBytes($script:InstallerScriptPath)
+        $script:installerBuildId = Get-InstallerBuildIdFromText -Text ([System.Text.Encoding]::UTF8.GetString($script:installerBytes))
+        $installerHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($script:installerBytes)
+        $script:installerSha256 = ([System.BitConverter]::ToString($installerHash)).Replace('-', '')
+        $bootstrapPath = (Join-Path $script:RepoRoot 'WingetAppSetup/Private/PowerShell7Bootstrap.ps1').Replace("'", "''")
+        # The relaunch download as the bootstrap does it, with the message helpers stubbed: the SHA256
+        # of the UTF-8 text it returns, which is the file's when the text is the file's.
+        $script:relaunchScript = @"
+`$ErrorActionPreference = 'Stop'
+. '$bootstrapPath'
+function Write-Info { param (`$Message) }
+function Write-WarningMessage { param (`$Message) }
+`$text = Get-PowerShell7RelaunchInstaller -Url '{URL}' -ExpectedBuildId '$($script:installerBuildId)'
+if (-not `$text) { 'relaunch-download: none'; exit 3 }
+`$hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes(`$text))
+'relaunch-download: ' + ([System.BitConverter]::ToString(`$hash)).Replace('-', '')
+"@
+        # The one-liner as it will read once it points at a release: irm piped to iex.
+        $script:oneLinerScript = "Set-ExecutionPolicy Bypass -Scope Process -Force; irm '{URL}' | iex"
+        $script:oneLinerBody = [System.Text.Encoding]::UTF8.GetBytes("Write-Output ('one-liner ran in PowerShell ' + `$PSVersionTable.PSVersion.Major)`n")
+        $script:windowsPowerShell = $null
+        if ($IsWindows) {
+            $script:windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        }
+    }
+
+    It 'pwsh: the relaunch download returns the installer''s own text' {
+        $result = Invoke-OctetStreamDownload -Executable ([System.Environment]::ProcessPath) -Body $script:installerBytes -RequestCount 1 -Script $script:relaunchScript
+
+        $result.Served | Should -Be 1
+        $result.Output | Should -Match "relaunch-download: $($script:installerSha256)" -Because "the child said: $($result.Output) $($result.Error)"
+    }
+
+    It 'pwsh: irm | iex runs a script served that way' {
+        $result = Invoke-OctetStreamDownload -Executable ([System.Environment]::ProcessPath) -Body $script:oneLinerBody -RequestCount 1 -Script $script:oneLinerScript
+
+        $result.Output | Should -Match 'one-liner ran in PowerShell 7' -Because "the child said: $($result.Output) $($result.Error)"
+    }
+
+    It 'Windows PowerShell 5.1: the relaunch download returns the installer''s own text' -Skip:(-not $IsWindows) {
+        $result = Invoke-OctetStreamDownload -Executable $script:windowsPowerShell -Body $script:installerBytes -RequestCount 1 -Script $script:relaunchScript
+
+        $result.Served | Should -Be 1
+        $result.Output | Should -Match "relaunch-download: $($script:installerSha256)" -Because "the child said: $($result.Output) $($result.Error)"
+    }
+
+    It 'Windows PowerShell 5.1: irm | iex runs a script served that way' -Skip:(-not $IsWindows) {
+        $result = Invoke-OctetStreamDownload -Executable $script:windowsPowerShell -Body $script:oneLinerBody -RequestCount 1 -Script $script:oneLinerScript
+
+        $result.Output | Should -Match 'one-liner ran in PowerShell 5' -Because "the child said: $($result.Output) $($result.Error)"
     }
 }
 

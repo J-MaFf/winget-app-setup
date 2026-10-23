@@ -9,19 +9,23 @@
 
       - Source 'raw-main' (the weekly run): the documented one-liner, fetched from raw main, in
         both passes: Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "<url>" | iex
+      - Source 'release' (dispatched with installer_source release, #289): the same one-liner
+        with a release's URL (Get-ReleaseInstallerUrl: the latest release, or -ReleaseTag), in
+        both passes. Under Windows PowerShell its bootstrap downloads that release again for the
+        PowerShell 7 relaunch, by the build's version, with nothing in between.
       - Source 'checkout', -Entry OneLiner (pull requests and dispatched runs, first pass): the
         checkout's winget-app-install.ps1 piped to iex the same way, with no file path.
       - Source 'checkout', -Entry File (second pass): <shell> -NoProfile -ExecutionPolicy Bypass
         -File <checkout>, the entry for clone, RMM and CI runs.
 
     Under Windows PowerShell an iex run has no file to relaunch, so the bootstrap downloads the
-    installer again, from raw main, for its PowerShell 7 relaunch. A checkout one-liner run in
-    that shell therefore defines an Invoke-RestMethod function first that answers that one URL
-    with the checkout's file and passes every other call to the real cmdlet; it lives only in the
-    Windows PowerShell process, not in the PowerShell 7 run it starts. Without it the PowerShell 7
-    half of the pass would test main instead of the change. Assert-Install.ps1 -InstallerPath
-    checks the result: every transcript, the bootstrap ones included, must log the checkout's
-    build id.
+    installer again for its PowerShell 7 relaunch (the release of its version, then raw main, and
+    their jsDelivr copies). A checkout one-liner run in that shell therefore defines an
+    Invoke-RestMethod function first that answers those URLs with the checkout's file and passes
+    every other call to the real cmdlet; it lives only in the Windows PowerShell process, not in
+    the PowerShell 7 run it starts. Without it the PowerShell 7 half of the pass would test main
+    or a release instead of the change. Assert-Install.ps1 -InstallerPath checks the result: every
+    transcript, the bootstrap ones included, must log the checkout's build id.
 
     Exit-code policy (the step fails with the code this script exits with):
       - 0: the pass succeeded.
@@ -59,10 +63,13 @@
 .PARAMETER Shell
     The PowerShell that starts the installer: 'pwsh' or 'powershell' (Windows PowerShell 5.1).
 .PARAMETER Entry
-    'OneLiner' (piped to iex) or 'File' (-File). A raw-main pass always runs the one-liner.
+    'OneLiner' (piped to iex) or 'File' (-File). A raw-main or release pass always runs the one-liner.
 .PARAMETER Source
-    'raw-main' or 'checkout'. Default: $env:INSTALLER_SOURCE; anything but 'raw-main' runs the
+    'raw-main', 'release' or 'checkout'. Default: $env:INSTALLER_SOURCE; anything else runs the
     checkout.
+.PARAMETER ReleaseTag
+    For Source 'release': the release tag (vX.Y.Z), or empty for the latest release. Default:
+    $env:INSTALLER_RELEASE_TAG.
 .PARAMETER KnownPlatformIncompatible
     Default: $env:KNOWN_PLATFORM_INCOMPATIBLE.
 .PARAMETER InstallerPath
@@ -91,6 +98,9 @@ param (
     [string]$Source = $env:INSTALLER_SOURCE,
 
     [Parameter(Mandatory = $false)]
+    [string]$ReleaseTag = $env:INSTALLER_RELEASE_TAG,
+
+    [Parameter(Mandatory = $false)]
     [string]$KnownPlatformIncompatible = $env:KNOWN_PLATFORM_INCOMPATIBLE,
 
     [Parameter(Mandatory = $false)]
@@ -103,17 +113,18 @@ param (
     [string]$ApplicabilityPath
 )
 
-# Get-InstallTranscriptFile and ConvertFrom-InstallTranscript, to read a pass's transcript, and
-# Save-ApplicabilityRecord.
+# Get-InstallTranscriptFile and ConvertFrom-InstallTranscript, to read a pass's transcript,
+# Save-ApplicabilityRecord, and Test-ReleaseTag and Get-ReleaseInstallerUrl for a release pass.
 . (Join-Path $PSScriptRoot 'TranscriptAssertions.ps1')
 
 <#
 .SYNOPSIS
-    Returns the script text that makes Invoke-RestMethod answer the installer's raw URL with a
-    local file.
+    Returns the script text that makes Invoke-RestMethod answer the installer's download URLs with
+    a local file.
 .DESCRIPTION
-    Any raw.githubusercontent.com URL of this repository's winget-app-install.ps1 (whatever ref)
-    gets the file's text, read as UTF-8 like the real download; the call is logged, so the
+    Any URL of this repository's winget-app-install.ps1 that the bootstrap downloads (on
+    raw.githubusercontent.com, a release, or jsDelivr, whatever ref or tag) gets the file's text,
+    read as UTF-8 like the real download; the call is logged, so the
     bootstrap transcript says the checkout was served. Every other call goes to the real cmdlet
     with its arguments unchanged (@args keeps the parameter names).
 .PARAMETER InstallerPath
@@ -130,7 +141,7 @@ function Get-CheckoutRelaunchShim {
 `$global:WingetAppSetupE2ECheckoutInstaller = $quotedPath
 function global:Invoke-RestMethod {
     foreach (`$argument in `$args) {
-        if ("`$argument" -match '^https://raw\.githubusercontent\.com/J-MaFf/winget-app-setup/.+/winget-app-install\.ps1`$') {
+        if ("`$argument" -match '^https://(raw\.githubusercontent\.com/J-MaFf/winget-app-setup/.+|github\.com/J-MaFf/winget-app-setup/releases/.+|cdn\.jsdelivr\.net/gh/J-MaFf/winget-app-setup@[^/]+)/winget-app-install\.ps1`$') {
             Write-Host "[e2e] Serving the checkout's installer (`$global:WingetAppSetupE2ECheckoutInstaller) for `$argument"
             return (Get-Content -Raw -Encoding UTF8 -LiteralPath `$global:WingetAppSetupE2ECheckoutInstaller)
         }
@@ -148,7 +159,9 @@ function global:Invoke-RestMethod {
 .PARAMETER Entry
     'OneLiner' or 'File'.
 .PARAMETER Source
-    'raw-main' or anything else (the checkout).
+    'raw-main', 'release' or anything else (the checkout).
+.PARAMETER ReleaseTag
+    For 'release': the tag, or empty for the latest release.
 .PARAMETER InstallerPath
     The checkout's installer.
 .RETURNS
@@ -166,6 +179,9 @@ function Get-InstallPassCommand {
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
         [string]$Source,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$ReleaseTag,
         [Parameter(Mandatory = $true)]
         [string]$InstallerPath
     )
@@ -175,7 +191,7 @@ function Get-InstallPassCommand {
         $shellName = 'Windows PowerShell'
     }
 
-    if ($Source -ne 'raw-main' -and $Entry -eq 'File') {
+    if ($Source -ne 'raw-main' -and $Source -ne 'release' -and $Entry -eq 'File') {
         return [pscustomobject]@{
             FilePath    = $Shell
             Arguments   = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $InstallerPath)
@@ -188,6 +204,16 @@ function Get-InstallPassCommand {
         # The readme's one-liner, verbatim. The bootstrap's relaunch download uses the same URL.
         $script = 'Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1" | iex'
         $description = "raw main (the production one-liner) in $shellName"
+    }
+    elseif ($Source -eq 'release') {
+        # The same one-liner with a release's URL (#289); no shim, so the 5.1 bootstrap's relaunch
+        # downloads the release itself.
+        $releaseName = 'the latest release'
+        if ($ReleaseTag) {
+            $releaseName = "release $ReleaseTag"
+        }
+        $script = 'Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "' + (Get-ReleaseInstallerUrl -Tag $ReleaseTag) + '" | iex'
+        $description = "$releaseName (the release one-liner) in $shellName"
     }
     else {
         $quotedPath = "'" + $InstallerPath.Replace("'", "''") + "'"
@@ -354,7 +380,12 @@ if ($MyInvocation.InvocationName -ne '.') {
         $LogDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
     }
 
-    $command = Get-InstallPassCommand -Shell $Shell -Entry $Entry -Source $Source -InstallerPath $InstallerPath
+    if ($Source -eq 'release' -and $ReleaseTag -and -not (Test-ReleaseTag -Tag $ReleaseTag)) {
+        Write-Host "Invoke-InstallPass.ps1: -ReleaseTag must be vMAJOR.MINOR.PATCH (optionally -prerelease), or empty for the latest release (got '$ReleaseTag')." -ForegroundColor Red
+        exit 64
+    }
+
+    $command = Get-InstallPassCommand -Shell $Shell -Entry $Entry -Source $Source -ReleaseTag $ReleaseTag -InstallerPath $InstallerPath
     Write-Host "Installer under test: $($command.Description) ($env:GITHUB_REF at $env:GITHUB_SHA)."
     if ($command.Script) {
         Write-Host 'The pass runs:'

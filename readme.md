@@ -68,11 +68,13 @@ Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubu
 > ```
 
 Note for 5.1 starts via `irm | iex`: there is no script file on disk to relaunch, so the
-bootstrap downloads the installer again to a temp file and runs that under `pwsh`, from
-`raw.githubusercontent.com` first and then from the jsDelivr mirror above. It uses a copy only
-when it is the same build as the one already running (the `Installer build:` id, see
-[Logs](#logs)), so a run started from a branch URL, or just before `main` changed, never
-relaunches different code. If no copy matches, the run stops with exit code 7. PowerShell 7 is
+bootstrap downloads the installer again to a temp file and runs that under `pwsh`. It tries the
+release of the running build's version first (its `winget-app-install.ps1` asset, then jsDelivr's
+copy of that tag; see [Releases](#releases)), then `main` on `raw.githubusercontent.com` and the
+jsDelivr mirror above. It uses a copy only when it is the same build as the one already running
+(the `Installer build:` id, see [Logs](#logs)), so a run started from a release, a branch URL, or
+just before `main` changed, never relaunches different code; the sources it passes over are
+logged as information. If no copy matches, the run stops with exit code 7. PowerShell 7 is
 installed by then, so open `pwsh` as administrator and run the same one-liner there: it needs no
 second download. Starting from a file (`-File .\winget-app-install.ps1`) relaunches the same file
 instead. The bootstrap deletes its downloaded copy once the `pwsh` run has ended.
@@ -2090,9 +2092,13 @@ throwaway VMs by construction:
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with
   `-File` like a clone or RMM run, so both entry points get an un-mocked run before a change
-  ships. In the 5.1 leg, the first pass's bootstrap downloads the installer from raw `main` again
-  for its PowerShell 7 relaunch; on checkout runs that one download is answered with the checkout,
-  so the PowerShell 7 half of the pass tests the change too. `e2e/Invoke-InstallPass.ps1` starts
+  ships. In the 5.1 leg, the first pass's bootstrap downloads the installer again for its
+  PowerShell 7 relaunch (the release of its version, then raw `main`); on checkout runs those
+  downloads are answered with the checkout, so the PowerShell 7 half of the pass tests the change
+  too. A dispatch can choose what those three legs run instead (`installer_source`): `raw-main`,
+  the weekly run's one-liner, or `release`, the one-liner from a release (`release_tag`, or the
+  latest), which `e2e/Save-ReleaseInstaller.ps1` saves first for the build id check, and which
+  stops the job when the release has no installer. The SYSTEM legs always run the checkout. `e2e/Invoke-InstallPass.ps1` starts
   every pass and decides whether it passed: it must exit 0, or 3010 (OK, restart required).
   `windows-latest` ships without `Microsoft.WindowsAppRuntime.1.8`, but the installer now installs
   the pinned framework there, so both passes are expected to exit 0 with Winget-AutoUpdate set up.
@@ -2243,7 +2249,35 @@ gh attestation verify winget-app-install.ps1 --repo J-MaFf/winget-app-setup `
     --signer-workflow J-MaFf/release-kit/.github/workflows/release.yml
 ```
 
-The `irm | iex` one-liner still runs `main`.
+The `irm | iex` one-liner still runs `main`. Once a release carries the installer (v2.0.0 is the
+first), it can run that release instead (#289), so only tagged, attested builds run:
+
+```powershell
+Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://github.com/J-MaFf/winget-app-setup/releases/latest/download/winget-app-install.ps1" | iex
+```
+
+What that needs is in place:
+
+- GitHub serves the asset as `application/octet-stream`. `irm` returns it as text in Windows
+  PowerShell 5.1 and in PowerShell 7, and `iex` runs it; `tests/PowerShell7Bootstrap.Tests.ps1`
+  checks both against a local server that answers the same way. (`iwr`'s `.Content` is bytes.)
+- The 5.1 bootstrap's relaunch download (above) fetches the same release by the build's version,
+  so a 5.1 start never mixes versions.
+- For a network GitHub is rate-limiting, the fallback is jsDelivr's copy of the tag,
+  `https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@vX.Y.Z/winget-app-install.ps1`: the file
+  git has at the tag, which is the asset byte for byte.
+- An E2E Install run dispatched with `installer_source: release` (and `release_tag`, or the latest
+  release) runs that one-liner in the PowerShell 7, Windows PowerShell 5.1 and ARM64 legs, and
+  checks that every transcript carries the release's build id.
+
+To switch, once the release is out:
+
+1. Dispatch E2E Install on `main` with `installer_source: release` and check that it is green.
+2. Point the one-liners at the release: the readme's (the 429 fallback becomes jsDelivr's copy of
+   the tag, to move at each release), the `-CollectDiagnostics` one in
+   `WingetAppSetup/Private/Diagnostics.ps1`, `build/fragments/head.ps1` and
+   `.github/ISSUE_TEMPLATE/install-failure.yml`, and the weekly e2e run's `INSTALLER_SOURCE`
+   (`release` instead of `raw-main`), with the tests that pin them.
 
 ## Project layout (for contributors)
 

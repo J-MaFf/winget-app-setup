@@ -528,12 +528,74 @@ function Get-InstallerBuildIdFromText {
 
 <#
 .SYNOPSIS
+    The URLs the PowerShell 7 relaunch of an irm | iex run downloads the installer from, in order.
+.DESCRIPTION
+    First the release of the running build's version (vX.Y.Z, from its build id; #289): its asset,
+    then jsDelivr's copy of the same tag, for a network GitHub is rate-limiting. Then main on
+    raw.githubusercontent.com and its jsDelivr mirror. Only a copy of the running build is used
+    (Get-PowerShell7RelaunchInstaller), so a run started from main passes over the release's copy,
+    and one started from the release passes over main's.
+.PARAMETER BuildId
+    The running installer's build id, '<ModuleVersion>+<hash>'. Without a version: main's URLs only.
+.OUTPUTS
+    [string[]] The URLs, in the order to try them.
+#>
+function Get-InstallerDownloadUrl {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$BuildId
+    )
+
+    $urls = @()
+    if ($BuildId -match '^(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))\+') {
+        $tag = 'v' + $Matches.version
+        $urls += 'https://github.com/J-MaFf/winget-app-setup/releases/download/{0}/winget-app-install.ps1' -f $tag
+        $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@{0}/winget-app-install.ps1' -f $tag
+    }
+    $urls += 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
+    $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
+    return $urls
+}
+
+<#
+.SYNOPSIS
+    The text of a download, whether Invoke-RestMethod returned it as text or as bytes.
+.DESCRIPTION
+    GitHub serves release assets as application/octet-stream (#289). Bytes are read as UTF-8, and a
+    leading byte order mark is dropped either way: iex would take it as part of the first command.
+.PARAMETER Content
+    What Invoke-RestMethod returned.
+.OUTPUTS
+    [string] The text; empty for no content.
+#>
+function ConvertTo-DownloadedText {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Content
+    )
+
+    if ($null -eq $Content) {
+        return ''
+    }
+    if ($Content -is [byte[]] -or ($Content -is [object[]] -and $Content.Count -gt 0 -and $Content[0] -is [byte])) {
+        $text = [System.Text.Encoding]::UTF8.GetString([byte[]]$Content)
+    }
+    else {
+        $text = [string]$Content
+    }
+    return $text.TrimStart([char]0xFEFF)
+}
+
+<#
+.SYNOPSIS
     Downloads the running installer build again, for the PowerShell 7 relaunch of an irm | iex run.
 .DESCRIPTION
     An irm | iex run has no file to relaunch, so it downloads the installer again (P2-18). Each URL
-    is tried in order (raw.githubusercontent.com, then the jsDelivr mirror for its throttling), and a
-    copy is used only when its build id is the running build's, so a branch run never relaunches
-    main's code and an error page is never run.
+    is tried in order (Get-InstallerDownloadUrl), and a copy is used only when its build id is the
+    running build's, so a branch run never relaunches main's code and an error page is never run.
+    A source passed over is logged as information: a run started from main passes over the
+    release's copy every time.
 .PARAMETER Url
     URLs to try, in order.
 .PARAMETER ExpectedBuildId
@@ -557,19 +619,19 @@ function Get-PowerShell7RelaunchInstaller {
         Write-Info ('Downloading the installer for the PowerShell 7 relaunch from {0}...' -f $candidateUrl)
         $installerText = $null
         try {
-            $installerText = [string](Invoke-RestMethod -Uri $candidateUrl -TimeoutSec $TimeoutSeconds)
+            $installerText = ConvertTo-DownloadedText -Content (Invoke-RestMethod -Uri $candidateUrl -TimeoutSec $TimeoutSeconds)
         }
         catch {
-            Write-WarningMessage ('  The download failed: {0}' -f $_)
+            Write-Info ('  The download failed: {0}' -f $_)
             continue
         }
         $downloadedBuildId = Get-InstallerBuildIdFromText -Text $installerText
         if (-not $downloadedBuildId) {
-            Write-WarningMessage '  That download is not the installer: it carries no installer build id.'
+            Write-Info '  That download is not the installer: it carries no installer build id.'
             continue
         }
         if ($ExpectedBuildId -and $downloadedBuildId -ne $ExpectedBuildId) {
-            Write-WarningMessage ('  That is installer build {0}, not build {1} that this run started with, so it is not used.' -f $downloadedBuildId, $ExpectedBuildId)
+            Write-Info ('  That is installer build {0}, not build {1} that this run started with, so it is not used.' -f $downloadedBuildId, $ExpectedBuildId)
             continue
         }
         return $installerText
@@ -624,10 +686,10 @@ function Get-PowerShell7RelaunchFile {
         if ($PowerShell7Installed) {
             # From a pwsh prompt the one-liner runs in PowerShell 7 straight away, with no second
             # download, so whatever URL the run started from works there.
-            Write-ErrorMessage 'PowerShell 7 is installed on this machine. Open PowerShell 7 (pwsh) as administrator and run the same one-liner there: it needs no second download. If raw.githubusercontent.com answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
+            Write-ErrorMessage 'PowerShell 7 is installed on this machine. Open PowerShell 7 (pwsh) as administrator and run the same one-liner there: it needs no second download. If GitHub answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
         }
         else {
-            Write-ErrorMessage 'Open Windows PowerShell as administrator and run the same one-liner there. If raw.githubusercontent.com answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
+            Write-ErrorMessage 'Open Windows PowerShell as administrator and run the same one-liner there. If GitHub answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
         }
         return $null
     }
@@ -757,9 +819,9 @@ function Invoke-PowerShell7BootstrapElevation {
     The caller's $PSCommandPath (inside a function it would name this file). Empty under
     `irm | iex`, which takes the download path.
 .PARAMETER InstallerUrl
-    URLs the iex relaunch path downloads the installer from, tried in order: by default the
-    one-liner's raw.githubusercontent.com URL, then the jsDelivr mirror the readme offers when raw
-    is rate-limiting the network. Parameterized for tests.
+    URLs the iex relaunch path downloads the installer from, tried in order. By default
+    Get-InstallerDownloadUrl's: the release of this build's version and its jsDelivr copy, then
+    raw main and its jsDelivr mirror. Parameterized for tests.
 .PARAMETER ExpectedBuildId
     The running installer's build id ($script:InstallerBuildId). The iex relaunch path uses only a
     download of this same build.
@@ -791,10 +853,7 @@ function Invoke-PowerShell7Bootstrap {
         [Parameter(Mandatory = $false)]
         [string]$CommandPath,
         [Parameter(Mandatory = $false)]
-        [string[]]$InstallerUrl = @(
-            'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1',
-            'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
-        ),
+        [string[]]$InstallerUrl = @(),
         [Parameter(Mandatory = $false)]
         [string]$ExpectedBuildId,
         [Parameter(Mandatory = $false)]
@@ -805,6 +864,9 @@ function Invoke-PowerShell7Bootstrap {
     )
 
     $script:PowerShell7BootstrapRelaunched = $false
+    if ($InstallerUrl.Count -eq 0) {
+        $InstallerUrl = @(Get-InstallerDownloadUrl -BuildId $ExpectedBuildId)
+    }
 
     Write-WarningMessage 'This installer requires PowerShell 7+ (pwsh), but this session is Windows PowerShell. Handing off...'
 

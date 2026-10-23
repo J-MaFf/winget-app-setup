@@ -3,7 +3,9 @@
     Reads installer transcripts and turns them into end-to-end assertion results.
 .DESCRIPTION
     Dot-sourced by e2e/Assert-Install.ps1. Everything here reads files and text, or asks the
-    module's applicability rule (Get-CatalogAppApplicability), and calls nothing Windows-specific
+    module's applicability rule (Get-CatalogAppApplicability), or names a release's URL
+    (Get-ReleaseInstallerUrl, also for e2e/Invoke-InstallPass.ps1 and
+    e2e/Save-ReleaseInstaller.ps1), and calls nothing Windows-specific
     itself, so tests/E2EAssertions.Tests.ps1 checks it against the sample transcripts in
     tests/fixtures/e2e on any OS (review finding P3-39: the parsing used to live inline in
     Assert-Install.ps1 with no tests, and its failure regex missed the timeout lines and the #279
@@ -501,6 +503,45 @@ function Get-InstallerBuildIdFromScript {
         return $match.Groups['id'].Value
     }
     return $null
+}
+
+<#
+.SYNOPSIS
+    Tells whether a release tag is one the release workflow publishes: vMAJOR.MINOR.PATCH,
+    optionally -prerelease (.github/workflows/release.yml).
+.PARAMETER Tag
+    The tag.
+.RETURNS
+    [bool]
+#>
+function Test-ReleaseTag {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$Tag
+    )
+
+    return ($Tag -match '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?\z')
+}
+
+<#
+.SYNOPSIS
+    The URL of a release's winget-app-install.ps1: what the one-liner runs once it points at
+    releases (#289).
+.PARAMETER Tag
+    The release tag (Test-ReleaseTag), or empty for the latest release.
+.RETURNS
+    [string]
+#>
+function Get-ReleaseInstallerUrl {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$Tag
+    )
+
+    if (-not $Tag) {
+        return 'https://github.com/J-MaFf/winget-app-setup/releases/latest/download/winget-app-install.ps1'
+    }
+    return ('https://github.com/J-MaFf/winget-app-setup/releases/download/{0}/winget-app-install.ps1' -f $Tag)
 }
 
 <#
