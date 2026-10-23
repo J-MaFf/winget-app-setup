@@ -408,8 +408,9 @@ Describe 'The time limits of runner preparation' {
     }
 
     It 'Fits the defaults into the timeout-minutes of every workflow step <Step> (<Count>), with a minute to spare' -ForEach @(
-        # The two PowerShell 7 legs and the three SYSTEM legs have a step each with the first name.
-        @{ Step = 'Remove the catalog apps the runner image ships with'; IncludePowerShell7 = $false; Count = 5 }
+        # The x64 PowerShell 7 leg and the three SYSTEM legs have a step each with the first name;
+        # the ARM64 PowerShell 7 leg has none (wgt-gq8.50).
+        @{ Step = 'Remove the catalog apps the runner image ships with'; IncludePowerShell7 = $false; Count = 4 }
         @{ Step = 'Remove the catalog apps the runner image ships with, and PowerShell 7'; IncludePowerShell7 = $true; Count = 1 }
     ) {
         # Over the limit, the runner stops the step part-way, and a killed winget's uninstaller
@@ -441,9 +442,9 @@ Describe 'The time limits of runner preparation' {
     }
 
     It 'Is run only by the steps whose time limit the test above checks' {
-        # A step under another name would escape that check: 5 + 1 steps above.
+        # A step under another name would escape that check: 4 + 1 steps above.
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
         $calls = [regex]::Matches($workflow, '(?m)^\s+&?\s*\.[\\/]e2e[\\/]Remove-PreinstalledApps\.ps1\b')
-        $calls.Count | Should -Be 6
+        $calls.Count | Should -Be 5
     }
 }

@@ -46,16 +46,19 @@ name: E2E Install
 # A sixth leg, e2e-install-arm64 (wgt-gq8.50), runs the PowerShell 7 leg's two passes and
 # assertions on that runner as the job's own account: the installer's own ladder (register App
 # Installer for the account, then Repair-WinGetPackageManager) has to make winget start, as on a
-# PC whose account never had it. It has no uninstall pass; the PowerShell 7 leg covers the
-# uninstaller.
+# PC whose account never had it. So it skips the runner preparation, whose winget.exe calls left
+# the account with a working winget before its first run did; the first pass skips Chrome (as the
+# image's MSI), 7-Zip and Git as already there. It has no uninstall pass; the PowerShell 7 leg
+# covers the uninstaller.
 # The SYSTEM legs without the engine and the PowerShell 7 legs on x64 and ARM64 name their
 # architecture (-ExpectOSArchitecture X64 or Arm64) and the apps that must and must not apply
 # there: checks that hold even if the module misread the architecture, which the per-app checks,
 # made by the same module, would not catch. The SYSTEM legs also print the PE machine type of each
 # app's main executable, evidence that fails nothing.
-# All legs first uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and
-# Git; e2e/Remove-PreinstalledApps.ps1, through App Installer's own winget.exe where the account has
-# no alias), so the first pass really installs them instead of skipping them as already installed.
+# Every leg but e2e-install-arm64 first uninstalls the catalog apps the runner image ships with
+# (Google Chrome, 7-Zip and Git; e2e/Remove-PreinstalledApps.ps1, through App Installer's own
+# winget.exe where the account has no alias), so the first pass really installs them instead of
+# skipping them as already installed.
 # PowerShell 7 and Windows Terminal stay preinstalled in the PowerShell 7 legs, which run in them.
 #
 # Which installer runs (INSTALLER_SOURCE), and how (e2e/Invoke-InstallPass.ps1 starts every pass):
@@ -589,24 +592,33 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
     runs-on: windows-11-arm
-    # Backstop: 15 + 3 + 45 + 3 + 45 + 40 + 5 = 156, plus checkout and uploads. The passes get 45
+    # Backstop: 3 + 3 + 45 + 3 + 45 + 40 + 5 = 144, plus checkout and uploads. The passes get 45
     # minutes instead of 35: the first one sets winget up for the account before it installs, and
     # the x64 and x86 installers run emulated.
-    timeout-minutes: 170
+    timeout-minutes: 160
     env:
       INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # As in e2e-install. The account has no winget alias, so the script runs App Installer's own
-      # winget.exe.
-      - name: Remove the catalog apps the runner image ships with
-        shell: powershell
+      # No runner preparation: its winget.exe calls left the account with a working winget, so the
+      # installer's own ladder never ran (wgt-gq8.50). This step runs no winget; it only shows
+      # what the account has before the first pass, whose transcript then shows the ladder.
+      - name: winget for the job's account before the first pass
+        shell: pwsh
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 3
         run: |
-          & .\e2e\Remove-PreinstalledApps.ps1
+          $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+          Write-Host "$alias present: $(Test-Path -LiteralPath $alias)"
+          $onPath = @(Get-Command -Name winget -CommandType Application -ErrorAction SilentlyContinue)
+          if ($onPath.Count -gt 0) {
+            Write-Host "winget on PATH: $($onPath[0].Source)"
+          }
+          else {
+            Write-Host 'winget on PATH: none'
+          }
 
       - name: Diagnostics before the first install pass
         shell: powershell
@@ -644,8 +656,9 @@ jobs:
           SECOND_PASS_OUTCOME: ${{ steps.second-pass.outcome }}
         run: |
           # As in e2e-install. The runner must be ARM64, where Reader 32-bit and Google Drive must
-          # apply and Reader 64-bit and Dell Command Update must not (wgt-gq8.50).
-          $assertArgs = @('-SkipApps', "$env:KNOWN_PLATFORM_INCOMPATIBLE")
+          # apply and Reader 64-bit and Dell Command Update must not (wgt-gq8.50). The image's
+          # Chrome MSI stays, so the first pass must skip Chrome as installed under Google.Chrome.
+          $assertArgs = @('-ExpectInstalledAs', 'Google.Chrome.EXE=Google.Chrome', '-SkipApps', "$env:KNOWN_PLATFORM_INCOMPATIBLE")
           $latestPass = 'first'
           if ($env:SECOND_PASS_OUTCOME -eq 'success' -or $env:SECOND_PASS_OUTCOME -eq 'failure') {
             $assertArgs = @('-ExpectAllSkippedOnSecondRun') + $assertArgs

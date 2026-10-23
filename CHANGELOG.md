@@ -55,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alias, so the installer's own ladder (register App Installer for the account, then
   `Repair-WinGetPackageManager`) has to make winget start first. The leg has no uninstall pass and
   reports to `report-failure` like the others.
+  - It skips the runner preparation. Running App Installer's `winget.exe` for it left the account
+    with a working winget before the first pass, so the ladder never ran. A step before the first
+    pass shows whether the account has the alias, without running winget. Chrome (the image's
+    `Google.Chrome` MSI, checked with `-ExpectInstalledAs`), 7-Zip and Git stay, and the first
+    pass skips them as already there.
   - `e2e/Assert-Install.ps1` takes `-ExpectOSArchitecture`, `-ExpectApplicable` and
     `-ExpectNotApplicable`, checked against the module, the latest transcript's
     `OS architecture:` line and its skip lines.

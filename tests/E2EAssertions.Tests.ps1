@@ -1154,7 +1154,12 @@ Describe 'The architecture a PowerShell 7 leg names (wgt-gq8.50)' {
         $job | Should -Match '(?m)^    runs-on: windows-11-arm\s*$'
         [regex]::Match($job, '(?m)^    if: .*$').Value | Should -Be ([regex]::Match($x64Job, '(?m)^    if: .*$').Value)
         [regex]::Match($job, '(?m)^      INSTALLER_SOURCE: .*$').Value | Should -Be ([regex]::Match($x64Job, '(?m)^      INSTALLER_SOURCE: .*$').Value)
-        $job | Should -Match '(?m)^\s+& \.\\e2e\\Remove-PreinstalledApps\.ps1\s*$'
+        # No runner preparation: its winget.exe calls would set winget up before the installer did.
+        $job | Should -Not -Match 'Remove-PreinstalledApps'
+        $job | Should -Match '(?ms)- name: winget for the job''s account before the first pass\s+shell: pwsh\s+continue-on-error: true'
+        $job.IndexOf('winget for the job''s account before the first pass') | Should -BeLessThan $job.IndexOf('First install pass')
+        [regex]::Match($job, '(?ms)- name: winget for the job''s account before the first pass.*?(?=      - name: )').Value | Should -Not -Match '--version|& \$|winget(\.exe)? (list|search|source)'
+        $job | Should -Match "'-ExpectInstalledAs', 'Google\.Chrome\.EXE=Google\.Chrome'"
         $job | Should -Match 'Invoke-InstallPass\.ps1 -Pass first -Shell pwsh -Entry OneLiner '
         $job | Should -Match 'Invoke-InstallPass\.ps1 -Pass second -Shell pwsh -Entry File '
         $job | Should -Match "'-ExpectOSArchitecture', 'Arm64',"
