@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ready for the one-liner to run from releases (#289, bead wgt-gq8.83); the readme keeps raw
+  `main` until v2.0.0 is out, and its Releases section lists the switch. Under Windows PowerShell
+  5.1 the bootstrap's relaunch download now tries the release of the running build's version
+  first (its asset, then jsDelivr's copy of the tag), then raw `main` and its mirror, and still
+  uses only a copy of the same build; the sources it passes over are logged as information, not
+  warnings. A download that comes back as bytes (GitHub serves release assets as
+  `application/octet-stream`) is read as UTF-8, without a byte order mark. A test serves the
+  installer that way from a local server and checks the relaunch download and `irm | iex` in a
+  real `pwsh` and, on Windows, a real Windows PowerShell 5.1. E2E Install takes
+  `installer_source` (`checkout`, `raw-main` or `release`) and `release_tag` on dispatch:
+  `release` runs the one-liner with a release's URL in the PowerShell 7, Windows PowerShell 5.1
+  and ARM64 account legs, after `e2e/Save-ReleaseInstaller.ps1` saves that release's installer for
+  the build-id check, and stops when the release has none.
 - Every install transcript (the PowerShell 7 run, the Windows PowerShell 5.1 bootstrap and the user
   phase) now prints `OS architecture: <arch>` right after `Installer build:` (bead wgt-gq8.52): the
   architecture `Get-OSArchitecture` reads and the catalog's `arch` lists are decided on, which only

@@ -1167,7 +1167,7 @@ Describe 'The architecture a PowerShell 7 leg names (wgt-gq8.50)' {
         $job | Should -Not -Match 'Invoke-UninstallPass'
         $jobLimit = [int][regex]::Match($job, '(?m)^    timeout-minutes: (\d+)').Groups[1].Value
         $stepLimits = @([regex]::Matches($job, '(?m)^        timeout-minutes: (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
-        $stepLimits.Count | Should -Be 7
+        $stepLimits.Count | Should -Be 8
         $jobLimit | Should -BeGreaterOrEqual ((($stepLimits | Measure-Object -Sum).Sum) + 5)
         $job | Should -Match 'name: e2e-install-transcripts-arm64'
         $job | Should -Match 'name: e2e-diagnostics-arm64'
