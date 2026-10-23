@@ -69,9 +69,9 @@ Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubu
 
 Note for 5.1 starts via `irm | iex`: there is no script file on disk to relaunch, so the
 bootstrap downloads the installer again to a temp file and runs that under `pwsh`. It tries the
-release of the running build's version first (its `winget-app-install.ps1` asset, then jsDelivr's
-copy of that tag; see [Releases](#releases)), then `main` on `raw.githubusercontent.com` and the
-jsDelivr mirror above. It uses a copy only when it is the same build as the one already running
+`winget-app-install.ps1` asset of the release of the running build's version first (see
+[Releases](#releases)), then `main` on `raw.githubusercontent.com`, then jsDelivr's copies of
+that release's tag and of `main` (the mirror above). It uses a copy only when it is the same build as the one already running
 (the `Installer build:` id, see [Logs](#logs)), so a run started from a release, a branch URL, or
 just before `main` changed, never relaunches different code; the sources it passes over are
 logged as information. If no copy matches, the run stops with exit code 7. PowerShell 7 is
@@ -2025,7 +2025,8 @@ throwaway VMs by construction:
   - each app on the second list does not apply and is recorded `Skipped` as not applicable.
 
   It then prints the PE machine type of each app's main executable under Program Files. That
-  output is evidence and fails nothing.- **The SYSTEM leg with Microsoft.WinGet.Client:** `e2e-install-system-winget-client`, on a fourth
+  output is evidence and fails nothing.
+- **The SYSTEM leg with Microsoft.WinGet.Client:** `e2e-install-system-winget-client`, on a fourth
   VM, runs the SYSTEM leg's pass twice through the machine phase with
   `-SystemInstallEngine WinGetClient`
   (`e2e/Invoke-SystemInstallPass.ps1 -SystemInstallEngine WinGetClient -PassCount 2`; see
@@ -2267,7 +2268,8 @@ What that needs is in place:
   `https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@vX.Y.Z/winget-app-install.ps1`: the file
   git has at the tag, which is the asset byte for byte.
 - An E2E Install run dispatched with `installer_source: release` (and `release_tag`, or the latest
-  release) runs that one-liner in the PowerShell 7, Windows PowerShell 5.1 and ARM64 legs, and
+  release; a `vX.Y.Z` tag, since the 5.1 relaunch finds a release by the build's version, which a
+  prerelease tag does not name) runs that one-liner in the PowerShell 7, Windows PowerShell 5.1 and ARM64 legs, and
   checks that every transcript carries the release's build id.
 
 To switch, once the release is out:

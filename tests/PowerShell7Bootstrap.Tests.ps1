@@ -1480,14 +1480,14 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         }
 
         Context 'Same build, from its release, raw main or their jsDelivr mirrors (review finding P2-18, #289)' {
-            It 'Tries the release of the build''s version and its jsDelivr copy, then raw main and its jsDelivr mirror' {
+            It 'Tries the release of the build''s version, raw main, then their jsDelivr copies' {
                 $script:triedUrls = [System.Collections.Generic.List[string]]::new()
                 Mock Invoke-RestMethod { $script:triedUrls.Add($Uri); throw '429: Too Many Requests' }
 
                 Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Out-Null
 
                 Should -Invoke Invoke-RestMethod -Times 4 -Exactly
-                $script:triedUrls | Should -Be @($script:releaseUrl, $script:releaseMirrorUrl, $script:rawUrl, $script:jsDelivrUrl)
+                $script:triedUrls | Should -Be @($script:releaseUrl, $script:rawUrl, $script:releaseMirrorUrl, $script:jsDelivrUrl)
             }
 
             It 'Relaunches the release''s copy for a run started from the release, whatever main serves now' {
@@ -1508,23 +1508,35 @@ Describe 'Invoke-PowerShell7Bootstrap' {
 
                 Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 42
 
-                Should -Invoke Invoke-RestMethod -Times 2 -Exactly
+                # The release, raw main (which serves a newer build), then the tag's jsDelivr copy.
+                Should -Invoke Invoke-RestMethod -Times 3 -Exactly
                 Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter { $Value -match [regex]::Escape("'$($script:runningBuildId)'") }
             }
 
-            It 'Passes over the release''s copy for a run started from main, and says so as information' {
-                # Every run started from main does this, so it must not read as a problem.
-                Mock Invoke-RestMethod { throw 'The remote server returned an error: (404) Not Found.' } -ParameterFilter { $Uri -eq $script:releaseUrl }
-                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId } -ParameterFilter { $Uri -eq $script:releaseMirrorUrl }
+            It 'Passes over the release''s copy for a run started from main, says so as information, and skips the tag''s mirror' {
+                # Every run started from main does this once the version is released, so it must
+                # not read as a problem, and the tag's jsDelivr copy, the same file, is not fetched.
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId } -ParameterFilter { $Uri -eq $script:releaseUrl }
                 Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:rawUrl }
 
                 Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 42
 
-                Should -Invoke Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
-                Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match 'The download failed: .*404' }
+                Should -Invoke Invoke-RestMethod -Times 2 -Exactly
+                Should -Invoke Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -eq $script:releaseMirrorUrl -or $Uri -eq $script:jsDelivrUrl }
                 Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match 'installer build 1\.0\.0\+bbbbbbbb, not build 1\.0\.0\+aaaaaaaa' }
                 Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'download|installer build' }
                 Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter { $Value -match [regex]::Escape("'$($script:runningBuildId)'") }
+            }
+
+            It 'Goes on to raw main when its version has no release yet, and says so as information' {
+                Mock Invoke-RestMethod { throw 'The remote server returned an error: (404) Not Found.' } -ParameterFilter { $Uri -eq $script:releaseUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:rawUrl }
+
+                Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 42
+
+                Should -Invoke Invoke-RestMethod -Times 2 -Exactly
+                Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match 'The download failed: .*404' }
+                Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'download|installer build' }
             }
 
             It 'Tries only main''s URLs when the running build carries no version' {
@@ -1611,11 +1623,11 @@ Describe 'Invoke-PowerShell7Bootstrap' {
 }
 
 Describe 'Get-InstallerDownloadUrl (#289)' {
-    It 'Puts the release of the build''s version and its jsDelivr copy before main and its mirror' {
+    It 'Puts the release of the build''s version first, then raw main, then their jsDelivr copies' {
         Get-InstallerDownloadUrl -BuildId '2.0.0+1a2b3c4d' | Should -Be @(
             'https://github.com/J-MaFf/winget-app-setup/releases/download/v2.0.0/winget-app-install.ps1',
-            'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@v2.0.0/winget-app-install.ps1',
             'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1',
+            'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@v2.0.0/winget-app-install.ps1',
             'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
         )
     }

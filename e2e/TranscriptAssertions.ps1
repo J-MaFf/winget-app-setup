@@ -507,8 +507,12 @@ function Get-InstallerBuildIdFromScript {
 
 <#
 .SYNOPSIS
-    Tells whether a release tag is one the release workflow publishes: vMAJOR.MINOR.PATCH,
-    optionally -prerelease (.github/workflows/release.yml).
+    Tells whether a release tag is one a release run can test: vMAJOR.MINOR.PATCH.
+.DESCRIPTION
+    The release workflow also publishes vMAJOR.MINOR.PATCH-prerelease tags
+    (.github/workflows/release.yml), but the Windows PowerShell 5.1 bootstrap finds a release by
+    the build's version alone (Get-InstallerDownloadUrl), so its relaunch from a prerelease
+    one-liner would find no copy of the build once main moved on.
 .PARAMETER Tag
     The tag.
 .RETURNS
@@ -520,7 +524,7 @@ function Test-ReleaseTag {
         [string]$Tag
     )
 
-    return ($Tag -match '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?\z')
+    return ($Tag -match '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z')
 }
 
 <#
@@ -798,8 +802,9 @@ function Get-ArchitectureAssertionResult {
 .PARAMETER Id
     The package ids.
 .RETURNS
-    [hashtable] id -> @{ Text; NotApplicable }: its 'not applicable' skip line, its install, its
-    'already installed' skip line, its failure, or none of them.
+    [hashtable] id -> @{ Text; NotApplicable; Problem }: its 'not applicable' skip line, its
+    install, its 'already installed' skip line or its failure. None of them is a Problem: a run
+    that never mentions an app did not treat it as applicable either.
 #>
 function ConvertTo-TranscriptAppRecord {
     param (
@@ -815,6 +820,7 @@ function ConvertTo-TranscriptAppRecord {
     foreach ($appId in $Id) {
         $text = "$($Transcript.Name): no install, skip or failure line"
         $notApplicable = $false
+        $problem = $null
         if (@($parsed.NotApplicable.Keys) -contains $appId) {
             $text = "$($Transcript.Name): Skipping (not applicable: $($parsed.NotApplicable[$appId]))"
             $notApplicable = $true
@@ -828,7 +834,10 @@ function ConvertTo-TranscriptAppRecord {
         elseif (@($parsed.FinalFailed) -contains $appId) {
             $text = "$($Transcript.Name): failed"
         }
-        $records[$appId] = @{ Text = $text; NotApplicable = $notApplicable }
+        else {
+            $problem = "$($Transcript.Name) has no install, skip or failure line for it"
+        }
+        $records[$appId] = @{ Text = $text; NotApplicable = $notApplicable; Problem = $problem }
     }
     return $records
 }

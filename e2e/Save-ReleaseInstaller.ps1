@@ -68,7 +68,7 @@ function Get-ReleaseInstallerDownload {
 
 if ($MyInvocation.InvocationName -ne '.') {
     if (-not $OutputPath -or ($Tag -and -not (Test-ReleaseTag -Tag $Tag))) {
-        Write-Host "Save-ReleaseInstaller.ps1: give -OutputPath, and -Tag vMAJOR.MINOR.PATCH (optionally -prerelease) or no tag for the latest release (got tag '$Tag')." -ForegroundColor Red
+        Write-Host "Save-ReleaseInstaller.ps1: give -OutputPath, and -Tag vMAJOR.MINOR.PATCH (not a prerelease) or no tag for the latest release (got tag '$Tag')." -ForegroundColor Red
         exit 64
     }
     # Windows PowerShell's progress bar slows Invoke-WebRequest down many times over.

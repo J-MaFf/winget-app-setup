@@ -231,7 +231,7 @@ Describe 'Get-InstallPassCommand' {
         @{ Shell = 'pwsh'; Entry = 'OneLiner'; Tag = ''; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/latest/download/winget-app-install.ps1'; Name = 'the latest release' }
         @{ Shell = 'pwsh'; Entry = 'File'; Tag = 'v2.0.0'; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/download/v2.0.0/winget-app-install.ps1'; Name = 'release v2.0.0' }
         @{ Shell = 'powershell'; Entry = 'OneLiner'; Tag = ''; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/latest/download/winget-app-install.ps1'; Name = 'the latest release' }
-        @{ Shell = 'powershell'; Entry = 'File'; Tag = 'v2.1.0-rc.1'; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/download/v2.1.0-rc.1/winget-app-install.ps1'; Name = 'release v2.1.0-rc.1' }
+        @{ Shell = 'powershell'; Entry = 'File'; Tag = 'v2.1.0'; Url = 'https://github.com/J-MaFf/winget-app-setup/releases/download/v2.1.0/winget-app-install.ps1'; Name = 'release v2.1.0' }
     ) {
         $command = Get-InstallPassCommand -Shell $Shell -Entry $Entry -Source 'release' -ReleaseTag $Tag -InstallerPath $script:Installer
 
@@ -353,8 +353,9 @@ Describe 'e2e/Invoke-InstallPass.ps1 run as a step' {
         $LASTEXITCODE | Should -Be 64
     }
 
-    It 'Exits 64 for a release run whose tag is not one the release workflow publishes: <Tag>' -ForEach @(
+    It 'Exits 64 for a release run whose tag the 5.1 bootstrap could not find: <Tag>' -ForEach @(
         @{ Tag = 'latest' }
+        @{ Tag = 'v2.1.0-rc.1' }
         @{ Tag = '2.0.0' }
         @{ Tag = 'v2.0' }
         @{ Tag = 'v2.0.0 ; Remove-Item' }
