@@ -408,7 +408,8 @@ Describe 'The time limits of runner preparation' {
     }
 
     It 'Fits the defaults into the timeout-minutes of every workflow step <Step> (<Count>), with a minute to spare' -ForEach @(
-        # The PowerShell 7 leg and the three SYSTEM legs have a step each with the first name.
+        # The x64 PowerShell 7 leg and the three SYSTEM legs have a step each with the first name;
+        # the ARM64 PowerShell 7 leg has none (wgt-gq8.50).
         @{ Step = 'Remove the catalog apps the runner image ships with'; IncludePowerShell7 = $false; Count = 4 }
         @{ Step = 'Remove the catalog apps the runner image ships with, and PowerShell 7'; IncludePowerShell7 = $true; Count = 1 }
     ) {

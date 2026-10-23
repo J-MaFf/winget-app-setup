@@ -6,9 +6,10 @@
     Review finding P3-40: windows-latest already has Google Chrome, 7-Zip and Git, so every first
     pass logged 'Skipping: <id> (already installed)' for them and their install paths never ran.
     .github/workflows/e2e-install.yml runs this before the first pass in every leg (PowerShell 7,
-    Windows PowerShell 5.1 and SYSTEM). With -IncludePowerShell7 (the Windows PowerShell 5.1 leg)
-    it also removes PowerShell 7, so the first pass starts from what a fresh box has and the
-    bootstrap has to install it.
+    Windows PowerShell 5.1 and SYSTEM) but the PowerShell 7 leg on ARM64, whose installer has to set
+    winget up for the account itself (wgt-gq8.50). With -IncludePowerShell7 (the Windows
+    PowerShell 5.1 leg) it also removes PowerShell 7, so the first pass starts from what a fresh
+    box has and the bootstrap has to install it.
 
     Tolerant: an app that is not installed is fine, and an app that cannot be removed is reported
     as a GitHub warning annotation and left in place, so this step never fails on its own. The

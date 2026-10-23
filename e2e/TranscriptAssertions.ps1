@@ -590,6 +590,210 @@ function New-TranscriptAssertionResult {
 
 <#
 .SYNOPSIS
+    Checks the architecture a leg names against the module's, the run's and each named app's
+    (wgt-gq8.50).
+.DESCRIPTION
+    The per-app checks compare the run with the same module on the same PC, so a
+    Get-OSArchitecture that misread ARM64 as x64 would fool both. These rows hold whatever the
+    module computes, since the workflow names its runner's architecture and the apps that must, or
+    must not, apply there:
+      - 'OS architecture is <architecture>': Get-OSArchitecture, in the checkout's module;
+      - 'The run's OS architecture is <architecture>': the run's own 'OS architecture:' line;
+      - 'Applies on <architecture>: <id>': the catalog app applies, and the run did not record it
+        as not applicable;
+      - 'Not applicable on <architecture>: <id>': it does not apply, and the run recorded it as not
+        applicable.
+    An id the catalog does not have fails its row. e2e/Assert-Install.ps1 gives what the run's
+    transcript records (ConvertTo-TranscriptAppRecord), e2e/Invoke-SystemInstallPass.ps1 what
+    last-run.json does.
+.PARAMETER ExpectedArchitecture
+    The leg's architecture, as Get-OSArchitecture names it.
+.PARAMETER DetectedArchitecture
+    What Get-OSArchitecture returned, or $null when it threw.
+.PARAMETER DetectionProblem
+    Why there is no DetectedArchitecture, or $null.
+.PARAMETER RunnerArchitecture
+    RUNNER_ARCH, for the detail only.
+.PARAMETER Transcript
+    The run's transcript ([pscustomobject] with Name and Parsed, ConvertFrom-InstallTranscript),
+    or $null.
+.PARAMETER Applicability
+    Package id -> [bool], true when the catalog app applies; $null when the catalog could not be
+    read.
+.PARAMETER ExpectApplicable
+    Catalog ids that must apply.
+.PARAMETER ExpectNotApplicable
+    Catalog ids that must not.
+.PARAMETER Recorded
+    What the run recorded for each named app: id -> @{ Text = <the record, for the detail>;
+    NotApplicable = <recorded as not applicable> }, or @{ Problem = <why there is none> }.
+.PARAMETER RecordProblem
+    Why the run left no record at all, or $null: every app row fails with it.
+.RETURNS
+    Assertion rows ([pscustomobject] with Assertion, Result and Detail).
+#>
+function Get-ArchitectureAssertionResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedArchitecture,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$DetectedArchitecture,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$DetectionProblem,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RunnerArchitecture,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Transcript,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [hashtable]$Applicability,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$ExpectApplicable = @(),
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$ExpectNotApplicable = @(),
+        [Parameter(Mandatory = $false)]
+        [hashtable]$Recorded = @{},
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RecordProblem
+    )
+
+    $detail = "Get-OSArchitecture: $DetectedArchitecture"
+    if ([string]::IsNullOrWhiteSpace($DetectedArchitecture)) {
+        $detail = 'Get-OSArchitecture gave no answer'
+        if ($DetectionProblem) {
+            $detail += ": $DetectionProblem"
+        }
+    }
+    if ($RunnerArchitecture) {
+        $detail += "; RUNNER_ARCH: $RunnerArchitecture"
+    }
+    $passed = (-not [string]::IsNullOrWhiteSpace($DetectedArchitecture) -and $DetectedArchitecture -eq $ExpectedArchitecture)
+    if (-not $passed) {
+        $detail += "; this leg's runner is $ExpectedArchitecture"
+    }
+    $rows = @(New-TranscriptAssertionResult -Name "OS architecture is $ExpectedArchitecture" -Passed $passed -Detail $detail)
+
+    $runDetail = 'no transcript of the run'
+    $runPassed = $false
+    if ($null -ne $Transcript) {
+        $logged = [string]$Transcript.Parsed.OSArchitecture
+        if ([string]::IsNullOrWhiteSpace($logged)) {
+            $runDetail = "$($Transcript.Name) has no 'OS architecture:' line"
+        }
+        else {
+            $runDetail = "$($Transcript.Name): OS architecture: $logged"
+            $runPassed = ($logged -eq $ExpectedArchitecture)
+        }
+    }
+    $rows += New-TranscriptAssertionResult -Name "The run's OS architecture is $ExpectedArchitecture" -Passed $runPassed -Detail $runDetail
+
+    $cases = @(
+        @{ Ids = @($ExpectApplicable); MustApply = $true; Assertion = "Applies on ${ExpectedArchitecture}: " }
+        @{ Ids = @($ExpectNotApplicable); MustApply = $false; Assertion = "Not applicable on ${ExpectedArchitecture}: " }
+    )
+    foreach ($case in $cases) {
+        foreach ($id in $case.Ids) {
+            $facts = @()
+            $problems = @()
+            if ($null -eq $Applicability) {
+                $problems += 'the checkout''s catalog could not be read'
+            }
+            elseif (-not $Applicability.ContainsKey($id)) {
+                $problems += 'the checkout''s catalog has no such app'
+            }
+            elseif ([bool]$Applicability[$id]) {
+                $facts += 'the catalog says it applies'
+                if (-not $case.MustApply) {
+                    $problems += "it must not apply on $ExpectedArchitecture"
+                }
+            }
+            else {
+                $facts += 'the catalog says it does not apply'
+                if ($case.MustApply) {
+                    $problems += "it must apply on $ExpectedArchitecture"
+                }
+            }
+            if ($RecordProblem) {
+                $problems += $RecordProblem
+            }
+            elseif (-not $Recorded.ContainsKey($id)) {
+                $problems += 'the run left no record of it'
+            }
+            elseif ($Recorded[$id].Problem) {
+                $problems += [string]$Recorded[$id].Problem
+            }
+            else {
+                $facts += [string]$Recorded[$id].Text
+                $recordedNotApplicable = [bool]$Recorded[$id].NotApplicable
+                if ($case.MustApply -and $recordedNotApplicable) {
+                    $problems += 'the run skipped it as not applicable'
+                }
+                elseif (-not $case.MustApply -and -not $recordedNotApplicable) {
+                    $problems += 'the run had to skip it as not applicable'
+                }
+            }
+            $rows += New-TranscriptAssertionResult -Name ($case.Assertion + $id) -Passed ($problems.Count -eq 0) -Detail ((@($facts) + @($problems)) -join '; ')
+        }
+    }
+    return $rows
+}
+
+<#
+.SYNOPSIS
+    What a run's transcript records for each named app, for Get-ArchitectureAssertionResult.
+.PARAMETER Transcript
+    The run's transcript ([pscustomobject] with Name and Parsed).
+.PARAMETER Id
+    The package ids.
+.RETURNS
+    [hashtable] id -> @{ Text; NotApplicable }: its 'not applicable' skip line, its install, its
+    'already installed' skip line, its failure, or none of them.
+#>
+function ConvertTo-TranscriptAppRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        $Transcript,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$Id = @()
+    )
+
+    $parsed = $Transcript.Parsed
+    $records = @{}
+    foreach ($appId in $Id) {
+        $text = "$($Transcript.Name): no install, skip or failure line"
+        $notApplicable = $false
+        if (@($parsed.NotApplicable.Keys) -contains $appId) {
+            $text = "$($Transcript.Name): Skipping (not applicable: $($parsed.NotApplicable[$appId]))"
+            $notApplicable = $true
+        }
+        elseif (@($parsed.Installed) -contains $appId) {
+            $text = "$($Transcript.Name): installed"
+        }
+        elseif (@($parsed.AlreadyInstalled) -contains $appId) {
+            $text = "$($Transcript.Name): Skipping (already installed)"
+        }
+        elseif (@($parsed.FinalFailed) -contains $appId) {
+            $text = "$($Transcript.Name): failed"
+        }
+        $records[$appId] = @{ Text = $text; NotApplicable = $notApplicable }
+    }
+    return $records
+}
+
+<#
+.SYNOPSIS
     Splits catalog apps into the ones the assertions expect installed and the ones whose
     not-applicable skip line they expect, by the installer's own rule.
 .DESCRIPTION

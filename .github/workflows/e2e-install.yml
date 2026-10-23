@@ -42,15 +42,24 @@ name: E2E Install
 # Adobe Reader 32-bit instead of 64-bit, Dell Command Update never, Google Drive's x64-labelled
 # installer as it is. Its runner account has no winget alias, but App Installer is registered and,
 # as SYSTEM, the module finds its machine-wide winget.exe (the arm64-probe workflow showed both).
-# Both SYSTEM legs without the engine name their architecture (-ExpectOSArchitecture X64 or Arm64)
-# and the apps that must and must not apply there, checks that hold even if the module misread the
-# architecture, which the per-app checks, made by the same module, would not catch; they also print
-# the PE machine type of each app's main executable, evidence that fails nothing. The ARM64 leg's
-# task gets 60 minutes instead of 40: the x64 and x86 installers run emulated there.
-# All legs first uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and
-# Git; e2e/Remove-PreinstalledApps.ps1, through App Installer's own winget.exe where the account has
-# no alias), so the first pass really installs them instead of skipping them as already installed. PowerShell 7 and Windows Terminal stay preinstalled in the
-# PowerShell 7 leg, which runs in them.
+# Its task gets 60 minutes instead of 40: the x64 and x86 installers run emulated there.
+# A sixth leg, e2e-install-arm64 (wgt-gq8.50), runs the PowerShell 7 leg's two passes and
+# assertions on that runner as the job's own account: the installer's own ladder (register App
+# Installer for the account, then Repair-WinGetPackageManager) has to make winget start, as on a
+# PC whose account never had it. So it skips the runner preparation, whose winget.exe calls left
+# the account with a working winget before its first run did; the first pass skips Chrome (as the
+# image's MSI), 7-Zip and Git as already there. It has no uninstall pass; the PowerShell 7 leg
+# covers the uninstaller.
+# The SYSTEM legs without the engine and the PowerShell 7 legs on x64 and ARM64 name their
+# architecture (-ExpectOSArchitecture X64 or Arm64) and the apps that must and must not apply
+# there: checks that hold even if the module misread the architecture, which the per-app checks,
+# made by the same module, would not catch. The SYSTEM legs also print the PE machine type of each
+# app's main executable, evidence that fails nothing.
+# Every leg but e2e-install-arm64 first uninstalls the catalog apps the runner image ships with
+# (Google Chrome, 7-Zip and Git; e2e/Remove-PreinstalledApps.ps1, through App Installer's own
+# winget.exe where the account has no alias), so the first pass really installs them instead of
+# skipping them as already installed.
+# PowerShell 7 and Windows Terminal stay preinstalled in the PowerShell 7 legs, which run in them.
 #
 # Which installer runs (INSTALLER_SOURCE), and how (e2e/Invoke-InstallPass.ps1 starts every pass):
 #   - schedule: the TRUE production path - the readme's one-liner, fetched from raw main and piped
@@ -354,6 +363,13 @@ jobs:
             $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
           }
           $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
+          # The runner is x64: Reader 64-bit must apply, Reader 32-bit and Dell Command Update must
+          # not, whatever Get-OSArchitecture says (wgt-gq8.50).
+          $assertArgs += @(
+            '-ExpectOSArchitecture', 'X64',
+            '-ExpectApplicable', 'Adobe.Acrobat.Reader.64-bit',
+            '-ExpectNotApplicable', 'Adobe.Acrobat.Reader.32-bit,Dell.CommandUpdate.Universal'
+          )
           # Also saved with the diagnostics, so report-failure can put the table in the issue.
           $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
           $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
@@ -567,6 +583,126 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: e2e-diagnostics-windows-powershell
+          path: ${{ runner.temp }}\e2e-diagnostics
+          if-no-files-found: warn
+
+  e2e-install-arm64:
+    # The PowerShell 7 leg on ARM64, as the job's own account (wgt-gq8.50; see the header comment).
+    # Same if: as e2e-install.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
+    runs-on: windows-11-arm
+    # Backstop: 3 + 3 + 45 + 3 + 45 + 40 + 5 = 144, plus checkout and uploads. The passes get 45
+    # minutes instead of 35: the first one sets winget up for the account before it installs, and
+    # the x64 and x86 installers run emulated.
+    timeout-minutes: 160
+    env:
+      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # No runner preparation: its winget.exe calls left the account with a working winget, so the
+      # installer's own ladder never ran (wgt-gq8.50). This step runs no winget; it only shows
+      # what the account has before the first pass, whose transcript then shows the ladder.
+      - name: winget for the job's account before the first pass
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+          Write-Host "$alias present: $(Test-Path -LiteralPath $alias)"
+          $onPath = @(Get-Command -Name winget -CommandType Application -ErrorAction SilentlyContinue)
+          if ($onPath.Count -gt 0) {
+            Write-Host "winget on PATH: $($onPath[0].Source)"
+          }
+          else {
+            Write-Host 'winget on PATH: none'
+          }
+
+      - name: Diagnostics before the first install pass
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '1-before-first-pass'
+
+      # As in e2e-install; the installer has to make winget start for the account first.
+      - name: First install pass (real install)
+        id: first-pass
+        shell: pwsh
+        timeout-minutes: 45
+        run: ./e2e/Invoke-InstallPass.ps1 -Pass first -Shell pwsh -Entry OneLiner -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-first.json')
+
+      - name: Diagnostics after the first install pass
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '2-after-first-pass'
+
+      - name: Second install pass (idempotence leg)
+        id: second-pass
+        shell: pwsh
+        timeout-minutes: 45
+        run: ./e2e/Invoke-InstallPass.ps1 -Pass second -Shell pwsh -Entry File -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-second.json')
+
+      - name: Run assertions (e2e/Assert-Install.ps1, on ARM64)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        timeout-minutes: 40
+        env:
+          SECOND_PASS_OUTCOME: ${{ steps.second-pass.outcome }}
+        run: |
+          # As in e2e-install. The runner must be ARM64, where Reader 32-bit and Google Drive must
+          # apply and Reader 64-bit and Dell Command Update must not (wgt-gq8.50). The image's
+          # Chrome MSI stays, so the first pass must skip Chrome as installed under Google.Chrome.
+          $assertArgs = @('-ExpectInstalledAs', 'Google.Chrome.EXE=Google.Chrome', '-SkipApps', "$env:KNOWN_PLATFORM_INCOMPATIBLE")
+          $latestPass = 'first'
+          if ($env:SECOND_PASS_OUTCOME -eq 'success' -or $env:SECOND_PASS_OUTCOME -eq 'failure') {
+            $assertArgs = @('-ExpectAllSkippedOnSecondRun') + $assertArgs
+            $latestPass = 'second'
+          }
+          else {
+            Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
+          }
+          if ($env:INSTALLER_SOURCE -ne 'raw-main') {
+            $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
+          }
+          $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
+          $assertArgs += @(
+            '-ExpectOSArchitecture', 'Arm64',
+            '-ExpectApplicable', 'Adobe.Acrobat.Reader.32-bit,Google.GoogleDrive',
+            '-ExpectNotApplicable', 'Adobe.Acrobat.Reader.64-bit,Dell.CommandUpdate.Universal'
+          )
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 @assertArgs 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
+          exit $LASTEXITCODE
+
+      - name: Diagnostics at the end of the job (with event logs and WAU logs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-end-of-job' -IncludeLogs
+
+      - name: Upload install transcripts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-install-transcripts-arm64
+          path: C:\ProgramData\winget-app-setup\logs\*.log
+          if-no-files-found: warn
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-arm64
           path: ${{ runner.temp }}\e2e-diagnostics
           if-no-files-found: warn
 
@@ -837,8 +973,8 @@ jobs:
     # artifacts. The old step inside e2e-install ran with 'shell: pwsh' and 'if: failure()': run
     # 35566866223 removed PowerShell 7 and the step died with 'pwsh: command not found', and a
     # job that hits timeout-minutes is cancelled, which failure() does not match.
-    needs: [e2e-install, e2e-install-windows-powershell, e2e-install-system, e2e-install-system-winget-client, e2e-install-system-arm64]
-    if: ${{ always() && (needs.e2e-install.result != 'success' || needs.e2e-install-windows-powershell.result != 'success' || needs.e2e-install-system.result != 'success' || needs.e2e-install-system-winget-client.result != 'success' || needs.e2e-install-system-arm64.result != 'success') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+    needs: [e2e-install, e2e-install-windows-powershell, e2e-install-arm64, e2e-install-system, e2e-install-system-winget-client, e2e-install-system-arm64]
+    if: ${{ always() && (needs.e2e-install.result != 'success' || needs.e2e-install-windows-powershell.result != 'success' || needs.e2e-install-arm64.result != 'success' || needs.e2e-install-system.result != 'success' || needs.e2e-install-system-winget-client.result != 'success' || needs.e2e-install-system-arm64.result != 'success') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -866,6 +1002,7 @@ jobs:
           TESTED_SHA: ${{ github.sha }}
           PWSH_LEG_RESULT: ${{ needs.e2e-install.result }}
           WINDOWS_POWERSHELL_LEG_RESULT: ${{ needs.e2e-install-windows-powershell.result }}
+          ARM64_LEG_RESULT: ${{ needs.e2e-install-arm64.result }}
           SYSTEM_LEG_RESULT: ${{ needs.e2e-install-system.result }}
           SYSTEM_WINGET_CLIENT_LEG_RESULT: ${{ needs.e2e-install-system-winget-client.result }}
           SYSTEM_ARM64_LEG_RESULT: ${{ needs.e2e-install-system-arm64.result }}
@@ -1028,13 +1165,15 @@ jobs:
               artifacts/e2e-install-transcripts artifacts/e2e-diagnostics
             leg_section e2e-install-windows-powershell 'started from Windows PowerShell 5.1' "$WINDOWS_POWERSHELL_LEG_RESULT" \
               artifacts/e2e-install-transcripts-windows-powershell artifacts/e2e-diagnostics-windows-powershell
+            leg_section e2e-install-arm64 'started from PowerShell 7 on ARM64 Windows 11' "$ARM64_LEG_RESULT" \
+              artifacts/e2e-install-transcripts-arm64 artifacts/e2e-diagnostics-arm64
             leg_section e2e-install-system 'run as SYSTEM through the RMM wrapper' "$SYSTEM_LEG_RESULT" \
               artifacts/e2e-install-transcripts-system artifacts/e2e-diagnostics-system
             leg_section e2e-install-system-winget-client 'run as SYSTEM with the Microsoft.WinGet.Client engine' "$SYSTEM_WINGET_CLIENT_LEG_RESULT" \
               artifacts/e2e-install-transcripts-system-winget-client artifacts/e2e-diagnostics-system-winget-client
             leg_section e2e-install-system-arm64 'run as SYSTEM through the RMM wrapper on ARM64 Windows 11' "$SYSTEM_ARM64_LEG_RESULT" \
               artifacts/e2e-install-transcripts-system-arm64 artifacts/e2e-diagnostics-system-arm64
-            echo "Full transcripts, event logs, Winget-AutoUpdate logs and assertion output, as far as each job got, are in the run's artifacts: \`e2e-install-transcripts\` and \`e2e-diagnostics\` for \`e2e-install\`, the same names with \`-windows-powershell\` for the Windows PowerShell 5.1 leg, \`-system\` for the SYSTEM leg, \`-system-winget-client\` for the SYSTEM leg with the Microsoft.WinGet.Client engine (whose diagnostics also hold the pin check and the WinGet engine logs) and \`-system-arm64\` for the SYSTEM leg on ARM64."
+            echo "Full transcripts, event logs, Winget-AutoUpdate logs and assertion output, as far as each job got, are in the run's artifacts: \`e2e-install-transcripts\` and \`e2e-diagnostics\` for \`e2e-install\`, the same names with \`-windows-powershell\` for the Windows PowerShell 5.1 leg, \`-arm64\` for the PowerShell 7 leg on ARM64, \`-system\` for the SYSTEM leg, \`-system-winget-client\` for the SYSTEM leg with the Microsoft.WinGet.Client engine (whose diagnostics also hold the pin check and the WinGet engine logs) and \`-system-arm64\` for the SYSTEM leg on ARM64."
           } > "$body"
 
           # GitHub rejects an issue or comment body over 65536 characters.

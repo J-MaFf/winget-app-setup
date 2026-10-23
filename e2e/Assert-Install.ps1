@@ -54,6 +54,11 @@
          instead of finding one.
      10. With -ExpectInstalledAs: the first pass skipped each named app as already installed
          under the other id given (wgt-zu3).
+     11. With -ExpectOSArchitecture (wgt-gq8.50): the architecture the leg names, which a
+         misread Get-OSArchitecture cannot fool, as 1-8 can: Get-OSArchitecture and the latest
+         transcript's 'OS architecture:' line must say it, each -ExpectApplicable app must apply
+         and not be skipped there as not applicable, and each -ExpectNotApplicable app must not
+         apply and be skipped as not applicable (Get-ArchitectureAssertionResult).
 
     Prints a per-assertion PASS/FAIL table and exits nonzero listing the failures.
 .PARAMETER SkipApps
@@ -92,6 +97,14 @@
     pass must have skipped each app as already installed under that id (10). The
     e2e-install-windows-powershell leg keeps the runner image's Chrome MSI for this:
     'Google.Chrome.EXE=Google.Chrome'.
+.PARAMETER ExpectOSArchitecture
+    The runner's architecture as Get-OSArchitecture names it (X64, Arm64), which adds the
+    architecture assertions (11).
+.PARAMETER ExpectApplicable
+    Catalog ids that must apply on that architecture (comma-separated in one string also works).
+    Needs -ExpectOSArchitecture.
+.PARAMETER ExpectNotApplicable
+    Catalog ids that must not apply there, given the same way. Needs -ExpectOSArchitecture.
 .NOTES
     Exit codes: 0 = all assertions passed, 1 = one or more assertions failed (each listed).
 #>
@@ -116,7 +129,17 @@ param (
     [switch]$ExpectPowerShell7Installed,
 
     [Parameter(Mandatory = $false)]
-    [string[]]$ExpectInstalledAs = @()
+    [string[]]$ExpectInstalledAs = @(),
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('X64', 'Arm64', 'X86')]
+    [string]$ExpectOSArchitecture,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$ExpectApplicable = @(),
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$ExpectNotApplicable = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -132,6 +155,11 @@ foreach ($pair in @($ExpectInstalledAs | ForEach-Object { $_ -split ',' } | ForE
         throw "-ExpectInstalledAs '$pair' is not '<catalog id>=<installedAs id>'."
     }
     $expectedInstalledAs[$parts[0].Trim()] = $parts[1].Trim()
+}
+$ExpectApplicable = @($ExpectApplicable | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$ExpectNotApplicable = @($ExpectNotApplicable | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if (-not $ExpectOSArchitecture -and ($ExpectApplicable.Count -gt 0 -or $ExpectNotApplicable.Count -gt 0)) {
+    throw '-ExpectApplicable and -ExpectNotApplicable need -ExpectOSArchitecture.'
 }
 
 # Import the module from the checkout - same source of truth, no reimplementation drift. The
@@ -338,6 +366,41 @@ if ($frameworkStatus.Present -eq $false) {
 }
 foreach ($row in (Get-TranscriptAssertionResult @transcriptAssertionArgs)) {
     $results.Add($row)
+}
+
+# --- 11. The architecture the leg names (wgt-gq8.50) ----------------------------------------
+# Checked against the module, the latest transcript's 'OS architecture:' line and its skip lines,
+# so a misread architecture, which the checks above would share with the run, still fails here.
+if ($ExpectOSArchitecture) {
+    $verdicts = @{}
+    foreach ($app in $applicability.Applicable) {
+        $verdicts[$app.name] = $true
+    }
+    foreach ($id in $applicability.NotApplicable.Keys) {
+        $verdicts[$id] = $false
+    }
+    $detectedArchitecture = $null
+    $architectureProblem = $null
+    try {
+        $detectedArchitecture = [string](Get-OSArchitecture)
+    }
+    catch {
+        $architectureProblem = $_.Exception.Message
+    }
+    $latestFile = @((Get-InstallTranscriptFile -LogDirectory $logDirectory).RealRun) | Select-Object -Last 1
+    $latestTranscript = $null
+    $recorded = @{}
+    $recordProblem = 'no transcript of the run'
+    if ($latestFile) {
+        $latestTranscript = [pscustomobject]@{ Name = $latestFile.Name; Parsed = (ConvertFrom-InstallTranscript -Content ([string](Get-Content -LiteralPath $latestFile.FullName -Raw))) }
+        $recorded = ConvertTo-TranscriptAppRecord -Transcript $latestTranscript -Id (@($ExpectApplicable) + @($ExpectNotApplicable))
+        $recordProblem = $null
+    }
+    # A skip-listed app is not decided above, so it is not checked here either.
+    $architectureRows = Get-ArchitectureAssertionResult -ExpectedArchitecture $ExpectOSArchitecture -DetectedArchitecture $detectedArchitecture -DetectionProblem $architectureProblem -RunnerArchitecture "$env:RUNNER_ARCH" -Transcript $latestTranscript -Applicability $verdicts -ExpectApplicable @($ExpectApplicable | Where-Object { $SkipApps -notcontains $_ }) -ExpectNotApplicable @($ExpectNotApplicable | Where-Object { $SkipApps -notcontains $_ }) -Recorded $recorded -RecordProblem $recordProblem
+    foreach ($row in $architectureRows) {
+        $results.Add($row)
+    }
 }
 
 # --- Report ----------------------------------------------------------------------------------

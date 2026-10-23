@@ -1403,19 +1403,12 @@ function Split-SystemPassList {
 
 <#
 .SYNOPSIS
-    Checks the architecture the leg names against the module's and the run's (wgt-gq8.50).
+    Checks the architecture the leg names against the module's, the run's and last-run.json's
+    (wgt-gq8.50).
 .DESCRIPTION
-    The per-app rows compare last-run.json with Test-AppApplicability on the same PC, so a
-    Get-OSArchitecture that misread ARM64 as x64 would fool both. These rows hold whatever the
-    module computes, since the workflow names its runner's architecture and the apps that must, or
-    must not, apply there:
-      - 'OS architecture is <architecture>': Get-OSArchitecture, in the checkout's module;
-      - 'The run''s OS architecture is <architecture>': the run's own 'OS architecture:' line;
-      - 'Applies on <architecture>: <id>': the catalog app applies, and last-run.json does not
-        record it as not applicable;
-      - 'Not applicable on <architecture>: <id>': it does not apply, and last-run.json records it
-        Skipped as not applicable.
-    An id the catalog does not have fails its row.
+    Get-ArchitectureAssertionResult (e2e/TranscriptAssertions.ps1), with what last-run.json records
+    for each named app: an entry Skipped with a 'not applicable: ' reason is a not-applicable skip.
+    No record, or no single entry for an app, fails its row.
 .PARAMETER ExpectedArchitecture
     The leg's architecture, as Get-OSArchitecture names it.
 .PARAMETER DetectedArchitecture
@@ -1470,92 +1463,28 @@ function Get-SystemPassArchitectureResult {
         $RunRecord
     )
 
-    $detail = "Get-OSArchitecture: $DetectedArchitecture"
-    if ([string]::IsNullOrWhiteSpace($DetectedArchitecture)) {
-        $detail = 'Get-OSArchitecture gave no answer'
-        if ($DetectionProblem) {
-            $detail += ": $DetectionProblem"
-        }
-    }
-    if ($RunnerArchitecture) {
-        $detail += "; RUNNER_ARCH: $RunnerArchitecture"
-    }
-    $passed = (-not [string]::IsNullOrWhiteSpace($DetectedArchitecture) -and $DetectedArchitecture -eq $ExpectedArchitecture)
-    if (-not $passed) {
-        $detail += "; this leg's runner is $ExpectedArchitecture"
-    }
-    $rows = @([pscustomobject]@{ Assertion = "OS architecture is $ExpectedArchitecture"; Result = $(if ($passed) { 'PASS' } else { 'FAIL' }); Detail = $detail })
-
-    $runDetail = 'no transcript of the run'
-    $runPassed = $false
-    if ($null -ne $Transcript) {
-        $logged = [string]$Transcript.Parsed.OSArchitecture
-        if ([string]::IsNullOrWhiteSpace($logged)) {
-            $runDetail = "$($Transcript.Name) has no 'OS architecture:' line"
-        }
-        else {
-            $runDetail = "$($Transcript.Name): OS architecture: $logged"
-            $runPassed = ($logged -eq $ExpectedArchitecture)
-        }
-    }
-    $rows += [pscustomobject]@{ Assertion = "The run's OS architecture is $ExpectedArchitecture"; Result = $(if ($runPassed) { 'PASS' } else { 'FAIL' }); Detail = $runDetail }
-
     $entries = @()
     if ($null -ne $RunRecord -and $null -ne $RunRecord.PSObject.Properties['apps']) {
         $entries = @($RunRecord.apps | Where-Object { $null -ne $_ })
     }
-    $cases = @(
-        @{ Ids = @($ExpectApplicable); MustApply = $true; Assertion = "Applies on ${ExpectedArchitecture}: " }
-        @{ Ids = @($ExpectNotApplicable); MustApply = $false; Assertion = "Not applicable on ${ExpectedArchitecture}: " }
-    )
-    foreach ($case in $cases) {
-        foreach ($id in $case.Ids) {
-            $facts = @()
-            $problems = @()
-            if ($null -eq $Applicability) {
-                $problems += 'the checkout''s catalog could not be read'
-            }
-            elseif (-not $Applicability.ContainsKey($id)) {
-                $problems += 'the checkout''s catalog has no such app'
-            }
-            elseif ([bool]$Applicability[$id]) {
-                $facts += 'the catalog says it applies'
-                if (-not $case.MustApply) {
-                    $problems += "it must not apply on $ExpectedArchitecture"
-                }
-            }
-            else {
-                $facts += 'the catalog says it does not apply'
-                if ($case.MustApply) {
-                    $problems += "it must apply on $ExpectedArchitecture"
-                }
-            }
-            $matching = @($entries | Where-Object { [string]$_.id -eq $id })
-            if ($null -eq $RunRecord) {
-                $problems += 'no last-run.json'
-            }
-            elseif ($matching.Count -ne 1) {
-                $problems += "$($matching.Count) entries in last-run.json"
-            }
-            else {
-                $entry = $matching[0]
-                $facts += 'last-run.json: ' + (Format-SystemPassAppEntry -Entry $entry)
-                $recordedNotApplicable = ([string]$entry.status -eq 'Skipped' -and ([string]$entry.reason).StartsWith('not applicable: '))
-                if ($case.MustApply -and $recordedNotApplicable) {
-                    $problems += 'the run skipped it as not applicable'
-                }
-                elseif (-not $case.MustApply -and -not $recordedNotApplicable) {
-                    $problems += 'the run had to skip it as not applicable'
-                }
-            }
-            $rows += [pscustomobject]@{
-                Assertion = $case.Assertion + $id
-                Result    = $(if ($problems.Count -eq 0) { 'PASS' } else { 'FAIL' })
-                Detail    = (@($facts) + @($problems)) -join '; '
-            }
+    $recorded = @{}
+    foreach ($id in (@($ExpectApplicable) + @($ExpectNotApplicable))) {
+        $matching = @($entries | Where-Object { [string]$_.id -eq $id })
+        if ($matching.Count -ne 1) {
+            $recorded[$id] = @{ Problem = "$($matching.Count) entries in last-run.json" }
+            continue
+        }
+        $entry = $matching[0]
+        $recorded[$id] = @{
+            Text          = 'last-run.json: ' + (Format-SystemPassAppEntry -Entry $entry)
+            NotApplicable = ([string]$entry.status -eq 'Skipped' -and ([string]$entry.reason).StartsWith('not applicable: '))
         }
     }
-    return $rows
+    $recordProblem = $null
+    if ($null -eq $RunRecord) {
+        $recordProblem = 'no last-run.json'
+    }
+    return @(Get-ArchitectureAssertionResult -ExpectedArchitecture $ExpectedArchitecture -DetectedArchitecture $DetectedArchitecture -DetectionProblem $DetectionProblem -RunnerArchitecture $RunnerArchitecture -Transcript $Transcript -Applicability $Applicability -ExpectApplicable $ExpectApplicable -ExpectNotApplicable $ExpectNotApplicable -Recorded $recorded -RecordProblem $recordProblem)
 }
 
 <#

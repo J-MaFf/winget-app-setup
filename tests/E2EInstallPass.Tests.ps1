@@ -360,7 +360,7 @@ Describe 'The applicability record taken before each pass' {
     It 'Is passed to every install pass of the workflow, one file per pass' {
         $passCalls = [regex]::Matches($script:Workflow, '(?m)Invoke-InstallPass\.ps1 -Pass (?<pass>first|second)\b.*$')
 
-        $passCalls.Count | Should -Be 4
+        $passCalls.Count | Should -Be 6
         foreach ($call in $passCalls) {
             $call.Value | Should -Match ([regex]::Escape(("-ApplicabilityPath (Join-Path `$env:RUNNER_TEMP 'e2e-applicability-{0}.json')" -f $call.Groups['pass'].Value)))
         }
@@ -369,6 +369,7 @@ Describe 'The applicability record taken before each pass' {
     It 'Is read by <Step> from the second pass only when that pass ran' -ForEach @(
         @{ Step = 'Run assertions (e2e/Assert-Install.ps1, shared with tier 2)' }
         @{ Step = 'Run assertions (e2e/Assert-Install.ps1, with the bootstrap checks)' }
+        @{ Step = 'Run assertions (e2e/Assert-Install.ps1, on ARM64)' }
     ) {
         $stepPattern = '(?ms)^\s+- name: ' + [regex]::Escape($Step) + '\r?\n(?<body>.*?)(?=^\s+- name: |\z)'
         $body = [regex]::Match($script:Workflow, $stepPattern).Groups['body'].Value
