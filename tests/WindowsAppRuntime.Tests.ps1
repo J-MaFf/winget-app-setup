@@ -244,7 +244,7 @@ Describe 'Install-WindowsAppRuntimeFramework (work-order item 31)' {
         Should -Invoke Get-AuthenticodeSignature -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq (Join-Path $script:stagingDir 'Microsoft.WindowsAppRuntime.1.8.msix') }
         Should -Invoke Invoke-AppxProvisioning -Times 1 -Exactly -ParameterFilter {
             $PackagePath -eq (Join-Path $script:stagingDir 'Microsoft.WindowsAppRuntime.1.8.msix') -and
-            -not $DependencyPackagePath -and -not $LicensePath -and
+            -not $PesterBoundParameters['DependencyPackagePath'] -and -not $PesterBoundParameters['LicensePath'] -and
             $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation AppxProvisioning)
         }
         Should -Invoke Get-WindowsAppRuntimeStatus -Times 1 -Exactly

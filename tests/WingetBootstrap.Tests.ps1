@@ -335,7 +335,7 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
 
         $result.Succeeded | Should -Be $true
         Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly
-        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $PesterBoundParameters['Force'] -and -not $PesterBoundParameters['AllUsers'] }
     }
 
     It 'Never repairs for all users unless told the framework is missing (issue #265: -AllUsers aborts on a newer framework)' {
@@ -354,7 +354,7 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
 
         $result.Succeeded | Should -Be $true
         $script:calls | Should -Be @($true)
-        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $Force }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $PesterBoundParameters['Force'] }
     }
 
     It 'Goes on to an unforced, then a forced repair for this account when nothing names the cause' {
@@ -365,8 +365,8 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
         $result.Available | Should -Be $true
         $result.Succeeded | Should -Be $false
         Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 2 -Exactly
-        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
-        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and $Force -and -not $AllUsers }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $PesterBoundParameters['Force'] -and -not $PesterBoundParameters['AllUsers'] }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and $Force -and -not $PesterBoundParameters['AllUsers'] }
     }
 
     # Review finding P3-27, the #279 wedge (E2E run 36384683838): the repair only says 'Try running
@@ -381,8 +381,8 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
         $result.Available | Should -Be $true
         $result.Succeeded | Should -Be $false
         Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 2 -Exactly
-        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $Force }
-        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $PesterBoundParameters['Force'] }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $PesterBoundParameters['Force'] -and -not $PesterBoundParameters['AllUsers'] }
         Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 0 -Exactly -ParameterFilter { $Force }
         ($script:warnings -join "`n") | Should -Match 'Repair-WinGetPackageManager -AllUsers -Latest failed: Failed to repair winget'
         $script:infos | Should -Contain 'Not running Repair-WinGetPackageManager -Latest -Force: the Microsoft.WindowsAppRuntime.1.8 framework App Installer needs is missing, and the all-users repair for it failed, which forcing cannot fix (-Force only closes running App Installer processes).'
@@ -787,7 +787,7 @@ Describe 'Save-WebFileAsNew (wgt-gq8.63)' {
         Save-WebFileAsNew -Uri 'https://cdn.winget.microsoft.com/cache/source2.msix' -Path $path
 
         [System.IO.File]::ReadAllBytes($path) | Should -Be $script:bytes
-        Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $Uri -eq 'https://cdn.winget.microsoft.com/cache/source2.msix' -and $UseBasicParsing -and $TimeoutSec -gt 0 -and -not $OutFile }
+        Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $Uri -eq 'https://cdn.winget.microsoft.com/cache/source2.msix' -and $UseBasicParsing -and $TimeoutSec -gt 0 -and -not $PesterBoundParameters['OutFile'] }
     }
 
     It 'Never opens a file that is already there for writing' {
@@ -1031,7 +1031,7 @@ Describe 'Invoke-NextWingetSourceFix (wgt-gq8.63)' {
         Invoke-NextWingetSourceFix -State $script:state -ExitCode -1978335217 | Should -Be $false
 
         Should -Invoke Register-WingetSourcePackage -Times 1 -Exactly
-        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly -ParameterFilter { @($KnownErrorCodes) -contains -2147009255 -and -not $AllUsersFirst }
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly -ParameterFilter { @($KnownErrorCodes) -contains -2147009255 -and -not $PesterBoundParameters['AllUsersFirst'] }
         Should -Invoke Reset-WingetSource -Times 0 -Exactly
         $script:state.ErrorCodes | Should -Contain -2147009255
     }

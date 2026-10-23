@@ -212,6 +212,31 @@ Describe 'Test harness (tests/TestHelpers.ps1, wgt-gq8.5)' {
         $undeclared | Should -BeNullOrEmpty
     }
 
+    It 'reads a parameter a call may leave out through $PesterBoundParameters, never as a negated variable (wgt-gq8.82)' {
+        # Pester defines a filter variable only for the parameters the call bound. For a call without
+        # -OutFile, '-not $OutFile' reads any $OutFile in the caller's scopes instead (a script that
+        # runs Invoke-Pester with an -OutFile parameter), while -not $PesterBoundParameters['OutFile']
+        # does not. A test's own value goes in a $script: variable, so no unscoped name is exempt.
+        $automatic = @('args', 'input', 'true', 'false', 'null', '_', 'PSItem', 'PesterBoundParameters')
+        $negated = foreach ($file in $script:TestFiles) {
+            foreach ($command in Get-CommandAst -Ast $file.Ast) {
+                $target = Get-MockTarget -Command $command
+                if (-not $target -or -not $target.Filter) {
+                    continue
+                }
+                $negations = $target.Filter.FindAll({ param($node) $node -is [System.Management.Automation.Language.UnaryExpressionAst] -and $node.TokenKind -in @('Not', 'Exclaim') -and $node.Child -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)
+                foreach ($negation in $negations) {
+                    $variable = $negation.Child.VariablePath
+                    if ($variable.IsUnscopedVariable -and $variable.UserPath -notin $automatic) {
+                        '{0}:{1} {2} ({3})' -f $file.Name, $negation.Extent.StartLineNumber, $negation.Extent.Text, $target.Name
+                    }
+                }
+            }
+        }
+
+        $negated | Should -BeNullOrEmpty
+    }
+
     It 'types the CIM object parameters (scheduled tasks, Invoke-CimMethod) as CimInstance, as the real cmdlets do' {
         # The real cmdlets reject a fake [pscustomobject] trigger or process before a Mock body
         # runs, so the tests that pass one use -RemoveParameterType. An [object] stand-in would

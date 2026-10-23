@@ -882,7 +882,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         It 'Leaves a signed-in user''s own run as it was: per-user fallback allowed' {
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 0
 
-            Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { -not $MachineWide }
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['MachineWide'] }
         }
 
         It 'Reports a deferred app in its own summary row, as neither installed nor failed, says who can install it, and exits 0' {
@@ -1015,7 +1015,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 3010
 
             Should -Invoke Invoke-SystemHandoff -Times 1 -Exactly -ParameterFilter {
-                -not [string]::IsNullOrEmpty($ScriptPath) -and $ExpectedSha256 -eq ('AB' * 32) -and $AccountContext.IsCrossUserElevation -and -not $SkipSystemCheck
+                -not [string]::IsNullOrEmpty($ScriptPath) -and $ExpectedSha256 -eq ('AB' * 32) -and $AccountContext.IsCrossUserElevation -and -not $PesterBoundParameters['SkipSystemCheck']
             }
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
             Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
@@ -2180,7 +2180,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         It 'Changes nothing without a budget: every app and the auto-update setup run, and no time budget is mentioned' {
             Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 0
 
-            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $TimeBudgetSpent }
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $PesterBoundParameters['TimeBudgetSpent'] }
             Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
             # Its own default wait, as before.
             Should -Invoke Wait-WauIdle -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('TimeoutSeconds') }
@@ -2197,7 +2197,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             @($result).Count | Should -Be 1
             $result | Should -Be 9
-            Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { $App.name -eq 'Contoso.First' -and -not $TimeBudgetSpent }
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { $App.name -eq 'Contoso.First' -and -not $PesterBoundParameters['TimeBudgetSpent'] }
             Should -Invoke Install-AppWithVerification -Times 2 -Exactly -ParameterFilter { $App.name -ne 'Contoso.First' -and $TimeBudgetSpent }
             Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
             # winget is still checked at the end: an unusable winget (2) ranks above 9.
@@ -2250,7 +2250,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 0 | Should -Be 0
 
-            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $TimeBudgetSpent }
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $PesterBoundParameters['TimeBudgetSpent'] }
             Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
             ((@($script:infoMessages) + @($script:warningMessages)) -join "`n") | Should -Not -Match 'Time budget'
         }
@@ -2282,7 +2282,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 30 | Should -Be 0
 
-            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $TimeBudgetSpent }
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $PesterBoundParameters['TimeBudgetSpent'] }
             Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
             ($script:warningMessages -join "`n") | Should -Not -Match 'Time budget: USED UP'
         }
@@ -2364,7 +2364,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps $script:apps -NonInteractive -WhatIf -MaxRuntimeMinutes 30 | Should -Be 0
 
-            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $TimeBudgetSpent }
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $PesterBoundParameters['TimeBudgetSpent'] }
             Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
             @($script:infoMessages | Where-Object { $_ -like '`[DRY-RUN`] Time budget: 30 minutes, until *. A real run starts no app install and no Winget-AutoUpdate setup after that, and exits 9; this preview is not cut short.' }) | Should -HaveCount 1
         }
@@ -2833,7 +2833,7 @@ Describe 'Install-AppWithVerification for the whole PC (-MachineWide; review fin
         [void](Install-AppWithVerification -App @{ name = 'Contoso.App' })
 
         Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $MachineScopeOnly }
-        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $MachineScopeOnly }
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['MachineScopeOnly'] }
     }
 
     It 'Defers an app with no machine-scope installer instead of installing it for the account running this, without a post-install check' {
@@ -4926,14 +4926,14 @@ Describe 'Install-AppWithVerification: declarative catalog fields (work-order it
         It 'Leaves an entry without a scope to Install-WingetPackage''s default' {
             [void](Install-AppWithVerification -App @{ name = 'Contoso.App' })
 
-            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Scope') -and -not $MachineScopeOnly }
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Scope') -and -not $PesterBoundParameters['MachineScopeOnly'] }
         }
 
         It 'Installs a scope user app with -Scope user in a run as the signed-in user' {
             $result = Install-AppWithVerification -App @{ name = 'Contoso.UserApp'; scope = 'user' }
 
             $result.Status | Should -Be 'Installed'
-            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $Scope -eq 'user' -and -not $MachineScopeOnly }
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $Scope -eq 'user' -and -not $PesterBoundParameters['MachineScopeOnly'] }
         }
 
         It 'Fails, never defers, a scope machine app with no machine-scope installer in <Run>' -ForEach @(
@@ -4997,7 +4997,7 @@ Describe 'Install-AppWithVerification: declarative catalog fields (work-order it
             $result = Install-AppWithVerification -App @{ name = 'Contoso.UserSetting'; userPhase = $true }
 
             $result.Status | Should -Be 'Installed'
-            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $MachineScopeOnly }
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['MachineScopeOnly'] }
         }
     }
 

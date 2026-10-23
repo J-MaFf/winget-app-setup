@@ -355,7 +355,7 @@ Describe 'Install-UserPhaseApp' {
         $result.code | Should -Be 0
         $result.restartRequired | Should -BeFalse
         Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter {
-            $PackageId -eq 'Contoso.UserOnly' -and $UserScopeOnly -and -not $MachineScopeOnly -and $Silent -and $TimeoutSeconds -eq 600 -and $InstallInProgressWaitSeconds -eq 120
+            $PackageId -eq 'Contoso.UserOnly' -and $UserScopeOnly -and -not $PesterBoundParameters['MachineScopeOnly'] -and $Silent -and $TimeoutSeconds -eq 600 -and $InstallInProgressWaitSeconds -eq 120
         }
         Should -Invoke Test-WingetPackageInstalled -Times 2 -Exactly
     }
@@ -455,7 +455,7 @@ Describe 'Install-UserPhaseApp' {
 
             $null = Install-UserPhaseApp -PackageId 'Contoso.UserSetting' -App $script:entry -TimeoutSeconds 600
 
-            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'msi' -and $UserScopeOnly -and -not $MachineScopeOnly -and $Scope -ne 'machine' }
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'msi' -and $UserScopeOnly -and -not $PesterBoundParameters['MachineScopeOnly'] -and $Scope -ne 'machine' }
         }
 
         It 'Keeps an app the hook could not configure installed, with the hook''s reason' {

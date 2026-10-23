@@ -1385,7 +1385,7 @@ Describe 'Install-WingetPackage (time limit, installer log, --silent and launch 
 
         # No -WingetPath: Invoke-WingetProcess resolves winget itself (Resolve-WingetExecutable).
         Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
-            $ArgumentList[0] -eq 'install' -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetInstall) -and -not $WingetPath
+            $ArgumentList[0] -eq 'install' -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetInstall) -and -not $PesterBoundParameters['WingetPath']
         }
     }
 
@@ -1783,7 +1783,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
     It 'installs the native MSIX on Windows 24H2+ when no MSI is available' {
         # -1978335216 = NO_APPLICABLE_INSTALLER: the wix (MSI) installer is gone at 7.7+.
         Mock Install-WingetPackage { @{ ExitCode = -1978335216 } } -ParameterFilter { $InstallerType -eq 'wix' }
-        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $InstallerType }
+        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $PesterBoundParameters['InstallerType'] }
         Mock Get-WindowsBuildNumber { 26100 }
         Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
         Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
@@ -1820,7 +1820,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
 
     It 'passes a 15-second timeout to the native-MSIX-path verification call' {
         Mock Install-WingetPackage { @{ ExitCode = -1978335216 } } -ParameterFilter { $InstallerType -eq 'wix' }
-        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $InstallerType }
+        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $PesterBoundParameters['InstallerType'] }
         Mock Get-WindowsBuildNumber { 26100 }
         Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
         Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
@@ -1846,7 +1846,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         @{ Value = $false }
     ) {
         Mock Install-WingetPackage { @{ ExitCode = -1978335216 } } -ParameterFilter { $InstallerType -eq 'wix' }
-        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $InstallerType }
+        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $PesterBoundParameters['InstallerType'] }
         Mock Get-WindowsBuildNumber { 26100 }
         Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
         Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
@@ -1889,7 +1889,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
 
     It 'shares the run''s wait budget for another installation between its MSI and MSIX attempts (review finding P2-15)' {
         Mock Install-WingetPackage { @{ ExitCode = -1978335216; InstallInProgressWaitedSeconds = 120 } } -ParameterFilter { $InstallerType -eq 'wix' }
-        Mock Install-WingetPackage { @{ ExitCode = 0; InstallInProgressWaitedSeconds = 30 } } -ParameterFilter { -not $InstallerType }
+        Mock Install-WingetPackage { @{ ExitCode = 0; InstallInProgressWaitedSeconds = 30 } } -ParameterFilter { -not $PesterBoundParameters['InstallerType'] }
         Mock Get-WindowsBuildNumber { 26100 }
         Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
         Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
@@ -1897,7 +1897,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result = Install-PowerShellLatest -InstallInProgressWaitSeconds 500
 
         Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' -and $InstallInProgressWaitSeconds -eq 500 }
-        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $InstallerType -and $InstallInProgressWaitSeconds -eq 380 }
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['InstallerType'] -and $InstallInProgressWaitSeconds -eq 380 }
         $result.InstallInProgressWaitedSeconds | Should -Be 150
     }
 
@@ -2470,7 +2470,7 @@ Describe 'Initialize-Winget as SYSTEM with the Microsoft.WinGet.Client engine (w
         $result = Initialize-Winget -AccountContext $script:account -SystemInstallEngine WinGetClient
 
         $result.Ready | Should -BeTrue
-        Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly -ParameterFilter { -not $NotRequired }
+        Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['NotRequired'] }
         Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
         $script:log | Should -Contain 'INFO: Install engine: winget.exe (X:\WindowsApps\winget.exe), not the requested Microsoft.WinGet.Client: the module is not ready: blocked.'
     }
