@@ -145,7 +145,7 @@ on:
           - release
         default: checkout
       release_tag:
-        description: 'With installer_source release: the tag (vX.Y.Z), or empty for the latest release'
+        description: 'With installer_source release: the tag (vX.Y.Z, not a prerelease), or empty for the latest release'
         type: string
         default: ''
   pull_request: # every PR; the changes job decides whether it needs the real install

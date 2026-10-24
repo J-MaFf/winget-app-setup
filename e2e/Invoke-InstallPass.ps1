@@ -381,7 +381,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 
     if ($Source -eq 'release' -and $ReleaseTag -and -not (Test-ReleaseTag -Tag $ReleaseTag)) {
-        Write-Host "Invoke-InstallPass.ps1: -ReleaseTag must be vMAJOR.MINOR.PATCH (optionally -prerelease), or empty for the latest release (got '$ReleaseTag')." -ForegroundColor Red
+        Write-Host "Invoke-InstallPass.ps1: -ReleaseTag must be vMAJOR.MINOR.PATCH, or empty for the latest release (got '$ReleaseTag'). A prerelease is not one the Windows PowerShell 5.1 bootstrap can find for its relaunch." -ForegroundColor Red
         exit 64
     }
 

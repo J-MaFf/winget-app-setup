@@ -5138,13 +5138,18 @@ function Get-InstallerDownloadUrl {
         [string]$BuildId
     )
 
-    $urls = @()
+    $tag = $null
     if ($BuildId -match '^(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))\+') {
         $tag = 'v' + $Matches.version
+    }
+    $urls = @()
+    if ($tag) {
         $urls += 'https://github.com/J-MaFf/winget-app-setup/releases/download/{0}/winget-app-install.ps1' -f $tag
-        $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@{0}/winget-app-install.ps1' -f $tag
     }
     $urls += 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
+    if ($tag) {
+        $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@{0}/winget-app-install.ps1' -f $tag
+    }
     $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
     return $urls
 }

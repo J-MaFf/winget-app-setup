@@ -20,13 +20,14 @@ Describe 'Test-ReleaseTag' {
     It 'Accepts <Tag>, a tag the release workflow publishes' -ForEach @(
         @{ Tag = 'v2.0.0' }
         @{ Tag = 'v10.20.30' }
-        @{ Tag = 'v2.1.0-rc.1' }
     ) {
         Test-ReleaseTag -Tag $Tag | Should -BeTrue
     }
 
     It 'Refuses ''<Tag>''' -ForEach @(
         @{ Tag = '' }
+        # A prerelease: the 5.1 bootstrap looks for the release of the build's version, v2.1.0.
+        @{ Tag = 'v2.1.0-rc.1' }
         @{ Tag = 'latest' }
         @{ Tag = '2.0.0' }
         @{ Tag = 'v2.0' }
@@ -37,7 +38,7 @@ Describe 'Test-ReleaseTag' {
         Test-ReleaseTag -Tag $Tag | Should -BeFalse
     }
 
-    It 'Agrees with the tag rule of the release workflow on ''<Tag>''' -ForEach @(
+    It 'Accepts only tags the release workflow publishes, and no prerelease: ''<Tag>''' -ForEach @(
         @{ Tag = 'v2.0.0' }
         @{ Tag = 'v2.1.0-rc.1' }
         @{ Tag = 'v0.0.0' }
@@ -51,7 +52,7 @@ Describe 'Test-ReleaseTag' {
         $workflowRule = [regex]::Match($release, "-notmatch '(?<rule>[^']+)'").Groups['rule'].Value
 
         $workflowRule | Should -Not -BeNullOrEmpty
-        Test-ReleaseTag -Tag $Tag | Should -Be ($Tag -match $workflowRule)
+        Test-ReleaseTag -Tag $Tag | Should -Be (($Tag -match $workflowRule) -and $Tag -notmatch '-')
     }
 }
 

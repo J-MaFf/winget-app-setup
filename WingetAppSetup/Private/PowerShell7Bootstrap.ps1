@@ -530,11 +530,12 @@ function Get-InstallerBuildIdFromText {
 .SYNOPSIS
     The URLs the PowerShell 7 relaunch of an irm | iex run downloads the installer from, in order.
 .DESCRIPTION
-    First the release of the running build's version (vX.Y.Z, from its build id; #289): its asset,
-    then jsDelivr's copy of the same tag, for a network GitHub is rate-limiting. Then main on
-    raw.githubusercontent.com and its jsDelivr mirror. Only a copy of the running build is used
-    (Get-PowerShell7RelaunchInstaller), so a run started from main passes over the release's copy,
-    and one started from the release passes over main's.
+    First the asset of the release of the running build's version (vX.Y.Z, from its build id;
+    #289), then main on raw.githubusercontent.com, then their jsDelivr copies, for a network GitHub
+    is rate-limiting. Only a copy of the running build is used (Get-PowerShell7RelaunchInstaller),
+    so a run started from main passes over the release's copy, and one started from the release
+    passes over main's. The tag's jsDelivr copy comes after main: it is the release's file, so a
+    run from main never needs it.
 .PARAMETER BuildId
     The running installer's build id, '<ModuleVersion>+<hash>'. Without a version: main's URLs only.
 .OUTPUTS
@@ -546,13 +547,18 @@ function Get-InstallerDownloadUrl {
         [string]$BuildId
     )
 
-    $urls = @()
+    $tag = $null
     if ($BuildId -match '^(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))\+') {
         $tag = 'v' + $Matches.version
+    }
+    $urls = @()
+    if ($tag) {
         $urls += 'https://github.com/J-MaFf/winget-app-setup/releases/download/{0}/winget-app-install.ps1' -f $tag
-        $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@{0}/winget-app-install.ps1' -f $tag
     }
     $urls += 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
+    if ($tag) {
+        $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@{0}/winget-app-install.ps1' -f $tag
+    }
     $urls += 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
     return $urls
 }
@@ -820,8 +826,8 @@ function Invoke-PowerShell7BootstrapElevation {
     `irm | iex`, which takes the download path.
 .PARAMETER InstallerUrl
     URLs the iex relaunch path downloads the installer from, tried in order. By default
-    Get-InstallerDownloadUrl's: the release of this build's version and its jsDelivr copy, then
-    raw main and its jsDelivr mirror. Parameterized for tests.
+    Get-InstallerDownloadUrl's: the release of this build's version, raw main, then their jsDelivr
+    copies. Parameterized for tests.
 .PARAMETER ExpectedBuildId
     The running installer's build id ($script:InstallerBuildId). The iex relaunch path uses only a
     download of this same build.

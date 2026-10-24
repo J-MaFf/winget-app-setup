@@ -1124,6 +1124,28 @@ Describe 'The architecture a PowerShell 7 leg names (wgt-gq8.50)' {
 
         $record.Text | Should -Be $Text
         $record.NotApplicable | Should -Be $NotApplicable
+        if ($Id -eq 'Contoso.Silent') {
+            $record.Problem | Should -Be 'install-20261021-190500.log has no install, skip or failure line for it'
+        }
+        else {
+            $record.Problem | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'Fails both kinds of row for an app the run''s transcript never mentions' {
+        # A reworded line, or an app dropped without one: the run did not treat it as applicable
+        # either, so 'Applies on' must not pass on silence.
+        $transcript = New-ArchitectureTranscript
+        $transcript.Parsed.AlreadyInstalled = @($transcript.Parsed.AlreadyInstalled | Where-Object { $_ -ne 'Google.GoogleDrive' })
+        $transcript.Parsed.NotApplicable.Remove('Dell.CommandUpdate.Universal')
+
+        $rows = Get-ArchitectureRow -Transcript $transcript
+
+        $drive = @($rows | Where-Object Assertion -EQ 'Applies on Arm64: Google.GoogleDrive')[0]
+        $drive.Result | Should -Be 'FAIL'
+        $drive.Detail | Should -Match 'has no install, skip or failure line for it'
+        @($rows | Where-Object Assertion -EQ 'Not applicable on Arm64: Dell.CommandUpdate.Universal')[0].Result | Should -Be 'FAIL'
+        @($rows | Where-Object Assertion -EQ 'Applies on Arm64: Adobe.Acrobat.Reader.32-bit')[0].Result | Should -Be 'PASS'
     }
 
     It 'Is checked by e2e/Assert-Install.ps1 only with -ExpectOSArchitecture, against the latest transcript' {
