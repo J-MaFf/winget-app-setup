@@ -109,8 +109,8 @@ param (
 # It reads the file from that commit with git and writes both pins into both scripts. Then upload
 # the changed scripts to the Script Repository again. Both empty: not set yet, and the wrapper
 # refuses to run anything until they are.
-$PinnedInstallerCommit = ''
-$PinnedInstallerSha256 = ''
+$PinnedInstallerCommit = '2c568853fcf398b629426cd364fddb5c6fb40fc2'
+$PinnedInstallerSha256 = '86F156B0FA4C5BD5FF0B0D5F6D1A1C0DC47FA47BD8C259EFB3F04E644C7B27E3'
 # --------------------------------------------------------------------------------------------------
 
 function Write-RmmLine {
