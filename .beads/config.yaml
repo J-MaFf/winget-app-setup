@@ -54,4 +54,5 @@
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
 
-sync.remote: "git+https://github.com/J-MaFf/winget-app-setup.git"
+sync:
+    remote: "git+https://github.com/J-MaFf/winget-app-setup.git"
