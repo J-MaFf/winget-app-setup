@@ -812,7 +812,9 @@ function Get-WingetLatestPackageVersion {
         [string]$PackageId
     )
 
-    $run = Invoke-WingetProcess -ArgumentList (@('show', '--id', $PackageId, '--exact', '--source', 'winget') + @(Get-WingetAgreementArgs)) -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetListCheck) -Echo None
+    # Not Get-WingetAgreementArgs: `winget show` rejects --accept-package-agreements (0x8A150002), and
+    # the lookup would then always come back empty (issue #335).
+    $run = Invoke-WingetProcess -ArgumentList @('show', '--id', $PackageId, '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetListCheck) -Echo None
     if ($run.LaunchFailed -or $run.TimedOut -or $run.ExitCode -ne 0) {
         return $null
     }
@@ -1304,7 +1306,12 @@ function Invoke-PowerShell7Bootstrap {
     if ($bootstrapInstalledPowerShell7) {
         try {
             $latestVersion = Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell'
-            if ($latestVersion) {
+            if (-not $latestVersion) {
+                # Said, not skipped silently (issue #335): without the newest version nobody can tell
+                # whether the MSI this run installed is the newest PowerShell.
+                Write-WarningMessage 'PowerShell 7 is the MSI release this run installed. winget did not report the newest PowerShell version, so no newer MSIX was looked for. To check by hand: winget upgrade Microsoft.PowerShell'
+            }
+            else {
                 $latestVersion = [version]('{0}.{1}.{2}' -f $latestVersion.Major, $latestVersion.Minor, [Math]::Max(0, $latestVersion.Build))
                 $stopgapVersion = Get-PowerShell7ExecutableVersion -Path $pwshPath
                 if ($stopgapVersion -and $latestVersion -gt $stopgapVersion) {

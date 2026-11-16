@@ -1838,8 +1838,21 @@ Describe 'Get-InstallerBuildIdFromText (review finding P2-18)' {
 
 Describe 'Get-WingetLatestPackageVersion (issue #333)' {
     BeforeEach {
-        Mock Get-WingetAgreementArgs { @('--accept-source-agreements') }
+        # The real Get-WingetAgreementArgs stays: a mocked one hid that `winget show` rejects its
+        # --accept-package-agreements (issue #335).
         Mock Get-ProcessTimeoutSeconds { 15 }
+    }
+
+    It 'Passes only arguments `winget show` accepts: not --accept-package-agreements (issue #335)' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Version: 7.7.0.0') }
+
+        Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell' | Out-Null
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            $ArgumentList -notcontains '--accept-package-agreements' -and
+            $ArgumentList -contains '--accept-source-agreements' -and
+            $ArgumentList -contains '--disable-interactivity'
+        }
     }
 
     It 'Reads the Version line of `winget show`, which names the newest release' {
@@ -2053,12 +2066,13 @@ Describe 'Invoke-PowerShell7Bootstrap: swapping the stopgap MSI for the MSIX (is
         Should -Invoke Invoke-PowerShell7MsixSwap -Times 0
     }
 
-    It 'Does not swap when winget names no newest version' {
+    It 'Does not swap, and says so, when winget names no newest version (issue #335)' {
         Mock Get-WingetLatestPackageVersion { $null }
 
-        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be 0
 
         Should -Invoke Invoke-PowerShell7MsixSwap -Times 0
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'did not report the newest PowerShell version' }
     }
 
     It 'Does not touch a PowerShell 7 the bootstrap did not install' {
