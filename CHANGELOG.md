@@ -1015,6 +1015,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The PowerShell 7 MSIX swap added for #333 never ran (#335, bead wgt-tik). Its version lookup,
+  `winget show`, was given `--accept-package-agreements`, which that command rejects with
+  0x8A150002, so the lookup always came back empty and the bootstrap skipped the swap without a
+  word. The lookup now passes only `--accept-source-agreements` and `--disable-interactivity`, and a
+  run that installed PowerShell 7 and cannot read the newest version prints a warning instead of
+  staying silent. Found on a real PC (KFWW11L6049): the bootstrap put the 7.6.10 MSI back and no
+  swap message reached the log. The tests had mocked `Get-WingetAgreementArgs`, which hid the
+  rejected argument; they now use the real one.
 - A run started in Windows PowerShell 5.1 on a PC with no PowerShell 7 no longer leaves it on the
   7.6 MSI once 7.7 or later is current (#333, bead wgt-bs9). The bootstrap installs that MSI so it
   has a `pwsh` to run in, and winget cannot upgrade an MSI to 7.7's MSIX-only package, so every

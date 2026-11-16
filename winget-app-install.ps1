@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d60125ca (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+82df88b5 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d60125ca'
+$script:InstallerBuildId = '1.0.0+82df88b5'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -5357,7 +5357,7 @@ function Get-WingetLatestPackageVersion {
         [string]$PackageId
     )
 
-    $run = Invoke-WingetProcess -ArgumentList (@('show', '--id', $PackageId, '--exact', '--source', 'winget') + @(Get-WingetAgreementArgs)) -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetListCheck) -Echo None
+    $run = Invoke-WingetProcess -ArgumentList @('show', '--id', $PackageId, '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetListCheck) -Echo None
     if ($run.LaunchFailed -or $run.TimedOut -or $run.ExitCode -ne 0) {
         return $null
     }
@@ -5677,7 +5677,10 @@ function Invoke-PowerShell7Bootstrap {
     if ($bootstrapInstalledPowerShell7) {
         try {
             $latestVersion = Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell'
-            if ($latestVersion) {
+            if (-not $latestVersion) {
+                Write-WarningMessage 'PowerShell 7 is the MSI release this run installed. winget did not report the newest PowerShell version, so no newer MSIX was looked for. To check by hand: winget upgrade Microsoft.PowerShell'
+            }
+            else {
                 $latestVersion = [version]('{0}.{1}.{2}' -f $latestVersion.Major, $latestVersion.Minor, [Math]::Max(0, $latestVersion.Build))
                 $stopgapVersion = Get-PowerShell7ExecutableVersion -Path $pwshPath
                 if ($stopgapVersion -and $latestVersion -gt $stopgapVersion) {
