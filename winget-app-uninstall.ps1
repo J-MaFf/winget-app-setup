@@ -5358,7 +5358,16 @@ function Find-PowerShell7MsixExecutable {
     catch {
         return $null
     }
-    if (-not $package -or [string]::IsNullOrWhiteSpace([string]$package.InstallLocation)) {
+    if (-not $package) {
+        return $null
+    }
+    if ($env:LOCALAPPDATA) {
+        $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'
+        if (Test-Path -LiteralPath $alias -PathType Leaf) {
+            return $alias
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$package.InstallLocation)) {
         return $null
     }
     $path = Join-Path $package.InstallLocation 'pwsh.exe'

@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+95d107db (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+d60125ca (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+95d107db'
+$script:InstallerBuildId = '1.0.0+d60125ca'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -5409,7 +5409,16 @@ function Find-PowerShell7MsixExecutable {
     catch {
         return $null
     }
-    if (-not $package -or [string]::IsNullOrWhiteSpace([string]$package.InstallLocation)) {
+    if (-not $package) {
+        return $null
+    }
+    if ($env:LOCALAPPDATA) {
+        $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'
+        if (Test-Path -LiteralPath $alias -PathType Leaf) {
+            return $alias
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$package.InstallLocation)) {
         return $null
     }
     $path = Join-Path $package.InstallLocation 'pwsh.exe'

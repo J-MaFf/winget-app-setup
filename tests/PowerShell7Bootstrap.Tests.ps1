@@ -2131,3 +2131,51 @@ Describe 'Find-PowerShell7MsiProductCode (issue #333)' {
         Find-PowerShell7MsiProductCode | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Find-PowerShell7MsixExecutable (issue #333)' {
+    BeforeAll {
+        # The Appx module is Windows PowerShell's; a stub keeps Mock working under any host.
+        function Get-AppxPackage { [CmdletBinding()] param ([string]$Name) }
+    }
+    BeforeEach {
+        $script:savedLocalAppData = $env:LOCALAPPDATA
+        $script:aliasDirectory = Join-Path $TestDrive 'Local\Microsoft\WindowsApps'
+        $script:installDirectory = Join-Path $TestDrive 'WindowsApps\Microsoft.PowerShell_7.7.0.0'
+        New-Item -ItemType Directory -Path $script:aliasDirectory, $script:installDirectory -Force | Out-Null
+        # TestDrive outlives a test inside its Describe: start each one without a pwsh.exe.
+        Remove-Item -LiteralPath (Join-Path $script:aliasDirectory 'pwsh.exe'), (Join-Path $script:installDirectory 'pwsh.exe') -Force -ErrorAction SilentlyContinue
+        $env:LOCALAPPDATA = Join-Path $TestDrive 'Local'
+        Mock Get-AppxPackage { [pscustomobject]@{ Name = 'Microsoft.PowerShell'; InstallLocation = $script:installDirectory } }
+    }
+    AfterEach {
+        $env:LOCALAPPDATA = $script:savedLocalAppData
+    }
+
+    It 'Prefers the account''s pwsh execution alias, the way a packaged pwsh is started' {
+        Set-Content -LiteralPath (Join-Path $script:aliasDirectory 'pwsh.exe') -Value ''
+        Set-Content -LiteralPath (Join-Path $script:installDirectory 'pwsh.exe') -Value ''
+
+        Find-PowerShell7MsixExecutable | Should -Be (Join-Path $script:aliasDirectory 'pwsh.exe')
+    }
+
+    It 'Falls back to the package''s own pwsh.exe when there is no alias' {
+        Set-Content -LiteralPath (Join-Path $script:installDirectory 'pwsh.exe') -Value ''
+
+        Find-PowerShell7MsixExecutable | Should -Be (Join-Path $script:installDirectory 'pwsh.exe')
+    }
+
+    It 'Returns $null when the package is not registered for this account' {
+        Mock Get-AppxPackage { }
+        Set-Content -LiteralPath (Join-Path $script:aliasDirectory 'pwsh.exe') -Value ''
+
+        Find-PowerShell7MsixExecutable | Should -BeNullOrEmpty
+    }
+
+    It 'Returns $null when the package cannot be read, or has no pwsh.exe' {
+        Mock Get-AppxPackage { throw 'access is denied' }
+        Find-PowerShell7MsixExecutable | Should -BeNullOrEmpty
+
+        Mock Get-AppxPackage { [pscustomobject]@{ Name = 'Microsoft.PowerShell'; InstallLocation = $script:installDirectory } }
+        Find-PowerShell7MsixExecutable | Should -BeNullOrEmpty
+    }
+}
