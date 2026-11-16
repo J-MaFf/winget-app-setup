@@ -1015,6 +1015,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A run started in Windows PowerShell 5.1 on a PC with no PowerShell 7 no longer leaves it on the
+  7.6 MSI once 7.7 or later is current (#333, bead wgt-bs9). The bootstrap installs that MSI so it
+  has a `pwsh` to run in, and winget cannot upgrade an MSI to 7.7's MSIX-only package, so every
+  later `winget upgrade` reported the install-technology block. After the relaunched run ends, the
+  bootstrap now provisions the MSIX for every user, registers it for the account, checks that its
+  `pwsh.exe` reports the newest version, and only then removes the MSI with `msiexec /x`. A step that
+  fails leaves the MSI in place and prints the manual steps; a SYSTEM run changes nothing, since
+  `Find-MachinePowerShell7` knows only the MSI's path. The exit code is still the apps' own. The
+  provisioning path (`Install-MsixProvisionedPackage`) had only unit-test coverage before this.
 - Test suite: two web-download tests failed when `Invoke-Pester` ran from a script with an `-OutFile`
   parameter (bead wgt-gq8.82). Their parameter filters checked `-not $OutFile` for a call without
   `-OutFile`, and Pester defines a filter variable only for the parameters the call bound, so the

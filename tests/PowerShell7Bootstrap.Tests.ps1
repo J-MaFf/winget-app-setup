@@ -678,6 +678,9 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         # The winget install runs through Invoke-WingetProcess (review findings P2-5, P2-6): no test
         # starts a real winget. The winget-path contexts below override this.
         Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
+        # No newer PowerShell than the one installed (issue #333): the MSIX swap has its own Describe,
+        # and these contexts count winget calls.
+        Mock Get-WingetLatestPackageVersion { $null }
         # The function sets this relaunch-loop sentinel before relaunching; clear it so no test
         # inherits another test's (or an outer process's) bootstrap state.
         $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = ''
@@ -1830,5 +1833,301 @@ Describe 'Get-InstallerBuildIdFromText (review finding P2-18)' {
         $text = "function Show-Build {`n    `$script:InstallerBuildId = '9.9.9+deadbeef'`n}`n"
 
         Get-InstallerBuildIdFromText -Text $text | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-WingetLatestPackageVersion (issue #333)' {
+    BeforeEach {
+        Mock Get-WingetAgreementArgs { @('--accept-source-agreements') }
+        Mock Get-ProcessTimeoutSeconds { 15 }
+    }
+
+    It 'Reads the Version line of `winget show`, which names the newest release' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Found PowerShell [Microsoft.PowerShell]', 'Version: 7.7.0.0', 'Publisher: Microsoft Corporation') }
+
+        Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell' | Should -Be ([version]'7.7.0.0')
+
+        # No --version: winget answers with its newest release.
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            $ArgumentList[0] -eq 'show' -and $ArgumentList -contains '--exact' -and $ArgumentList -notcontains '--version'
+        }
+    }
+
+    It 'Returns $null when winget cannot be run, times out or fails' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed }
+        Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell' | Should -BeNullOrEmpty
+        Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut }
+        Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell' | Should -BeNullOrEmpty
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 1 -Output @('Version: 7.7.0.0') }
+        Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell' | Should -BeNullOrEmpty
+    }
+
+    It 'Returns $null when no Version line is printed (a localized winget)' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Gefunden PowerShell', 'Version 7.7.0.0') }
+
+        Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell' | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Invoke-PowerShell7MsixSwap (issue #333)' {
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock Write-Success { }
+        Mock Get-ProcessTimeoutSeconds { 600 }
+        Mock Test-IsSystemAccount { $false }
+        Mock Install-MsixProvisionedPackage { @{ ExitCode = 0; Installed = $true } }
+        Mock Register-PowerShell7MsixForCurrentUser { $true }
+        Mock Find-PowerShell7MsixExecutable { 'C:\Program Files\WindowsApps\Microsoft.PowerShell_7.7.0.0\pwsh.exe' }
+        Mock Get-PowerShell7ExecutableVersion { [version]'7.7.0' }
+        Mock Find-PowerShell7MsiProductCode { '{2E334F2C-291A-46DA-9D05-1697F697E04D}' }
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+    }
+
+    It 'Provisions the MSIX, checks it runs, and only then removes the MSI' {
+        $script:order = @()
+        Mock Install-MsixProvisionedPackage { $script:order += 'provision'; @{ ExitCode = 0; Installed = $true } }
+        Mock Get-PowerShell7ExecutableVersion { $script:order += 'verify'; [version]'7.7.0' }
+        Mock Invoke-ExternalProcess { $script:order += 'msiexec'; New-TestProcessResult -ExitCode 0 }
+
+        $result = Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')
+
+        $result.Status | Should -Be 'Swapped'
+        $script:order -join ',' | Should -Be 'provision,verify,msiexec'
+        Should -Invoke Install-MsixProvisionedPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Microsoft.PowerShell' -and $VerifyNameLike -eq 'Microsoft.PowerShell' }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq 'msiexec.exe' -and $ArgumentString -like '/x {2E334F2C-291A-46DA-9D05-1697F697E04D} /qn /norestart*'
+        }
+    }
+
+    It 'Writes msiexec''s log into the logs folder when there is one' {
+        Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0') -LogDirectory 'C:\logs' | Out-Null
+
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $ArgumentString -like '*/l*v "C:\logs\pwsh-msi-remove-*.log"' }
+    }
+
+    It 'Treats msiexec exit code 3010 (restart pending) as removed' {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 3010 }
+
+        (Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')).Status | Should -Be 'Swapped'
+    }
+
+    It 'Treats msiexec exit code 1605 (already removed) as removed' {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1605 }
+
+        (Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')).Status | Should -Be 'Swapped'
+    }
+
+    It 'Changes nothing as SYSTEM, which cannot run the MSIX build' {
+        Mock Test-IsSystemAccount { $true }
+
+        $result = Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')
+
+        $result.Status | Should -Be 'Kept'
+        $result.Reason | Should -Be 'SystemAccount'
+        Should -Invoke Install-MsixProvisionedPackage -Times 0
+        Should -Invoke Invoke-ExternalProcess -Times 0
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'SYSTEM' -and $Message -match 'winget uninstall' }
+    }
+
+    It 'Keeps the MSI when the MSIX cannot be provisioned' {
+        Mock Install-MsixProvisionedPackage { @{ ExitCode = -1; Installed = $false } }
+
+        $result = Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')
+
+        $result.Reason | Should -Be 'ProvisionFailed'
+        Should -Invoke Invoke-ExternalProcess -Times 0
+    }
+
+    It 'Keeps the MSI when the MSIX cannot be registered for this account' {
+        Mock Register-PowerShell7MsixForCurrentUser { $false }
+
+        $result = Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')
+
+        $result.Reason | Should -Be 'RegisterFailed'
+        Should -Invoke Invoke-ExternalProcess -Times 0
+    }
+
+    It 'Keeps the MSI when the MSIX''s pwsh does not start' {
+        Mock Find-PowerShell7MsixExecutable { $null }
+
+        $result = Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')
+
+        $result.Reason | Should -Be 'VerifyFailed'
+        Should -Invoke Get-PowerShell7ExecutableVersion -Times 0
+        Should -Invoke Invoke-ExternalProcess -Times 0
+    }
+
+    It 'Keeps the MSI when the MSIX''s pwsh reports an older version' {
+        Mock Get-PowerShell7ExecutableVersion { [version]'7.6.10' }
+
+        $result = Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')
+
+        $result.Reason | Should -Be 'VerifyFailed'
+        Should -Invoke Invoke-ExternalProcess -Times 0
+    }
+
+    It 'Leaves the MSI when its product code is not found' {
+        Mock Find-PowerShell7MsiProductCode { $null }
+
+        $result = Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')
+
+        $result.Reason | Should -Be 'MsiNotFound'
+        Should -Invoke Invoke-ExternalProcess -Times 0
+    }
+
+    It 'Reports both packages installed when msiexec fails' {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1603 }
+
+        (Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')).Reason | Should -Be 'UninstallFailed'
+        Should -Invoke Write-Success -Times 0
+    }
+
+    It 'Reports both packages installed when msiexec cannot start' {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -LaunchFailed }
+
+        (Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')).Reason | Should -Be 'UninstallFailed'
+    }
+
+    It 'Reports both packages installed when msiexec runs past its time limit' {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -TimedOut }
+
+        (Invoke-PowerShell7MsixSwap -LatestVersion ([version]'7.7.0')).Reason | Should -Be 'UninstallFailed'
+    }
+}
+
+Describe 'Invoke-PowerShell7Bootstrap: swapping the stopgap MSI for the MSIX (issue #333)' {
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Write-Success { }
+        Mock Invoke-RestMethod { '# stub' }
+        Mock Install-PowerShell7FromMsi { $false }
+        Mock Get-ScriptExecutionPolicyBlock { $null }
+        Mock Test-IsAdmin { $true }
+        Mock Test-EffectiveNonInteractive { $true }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
+        Mock Get-Command { [pscustomobject]@{ Source = 'C:\winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+        Mock Get-WingetLatestPackageVersion { [version]'7.7.0.0' }
+        Mock Get-PowerShell7ExecutableVersion { [version]'7.6.10' }
+        Mock Invoke-PowerShell7MsixSwap { @{ Status = 'Swapped'; Reason = $null } }
+        $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = ''
+        # Misses before the install, finds the stopgap after it.
+        $script:findCallCount = 0
+        Mock Find-PowerShell7 {
+            $script:findCallCount++
+            if ($script:findCallCount -ge 2) { return 'C:\pf7\pwsh.exe' }
+            return $null
+        }
+    }
+    AfterEach {
+        $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = ''
+    }
+
+    It 'Swaps once the relaunched run has ended, when a newer release than the stopgap exists' {
+        $script:order = @()
+        Mock Start-Process { $script:order += 'relaunch'; [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+        Mock Invoke-PowerShell7MsixSwap { $script:order += 'swap'; @{ Status = 'Swapped'; Reason = $null } }
+
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' -LogDirectory 'C:\logs' | Should -Be 0
+
+        $script:order -join ',' | Should -Be 'relaunch,swap'
+        Should -Invoke Invoke-PowerShell7MsixSwap -Times 1 -Exactly -ParameterFilter { $LatestVersion -eq [version]'7.7.0' -and $LogDirectory -eq 'C:\logs' }
+    }
+
+    It 'Passes the newest version with a zero build when winget prints a four-part one' {
+        Mock Get-WingetLatestPackageVersion { [version]'7.7.1.0' }
+
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+        Should -Invoke Invoke-PowerShell7MsixSwap -Times 1 -Exactly -ParameterFilter { $LatestVersion -eq [version]'7.7.1' }
+    }
+
+    It 'Does not swap when the stopgap is already the newest release' {
+        Mock Get-PowerShell7ExecutableVersion { [version]'7.7.0' }
+
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+        Should -Invoke Invoke-PowerShell7MsixSwap -Times 0
+    }
+
+    It 'Does not swap when winget names no newest version' {
+        Mock Get-WingetLatestPackageVersion { $null }
+
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+        Should -Invoke Invoke-PowerShell7MsixSwap -Times 0
+    }
+
+    It 'Does not touch a PowerShell 7 the bootstrap did not install' {
+        Mock Find-PowerShell7 { 'C:\pf7\pwsh.exe' }
+
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+        Should -Invoke Get-WingetLatestPackageVersion -Times 0
+        Should -Invoke Invoke-PowerShell7MsixSwap -Times 0
+    }
+
+    It 'Does not swap when the relaunch could not start' {
+        Mock Start-Process { throw 'cannot start' } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be 7
+
+        Should -Invoke Invoke-PowerShell7MsixSwap -Times 0
+    }
+
+    It 'Keeps the run''s exit code whatever the swap does' {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 2 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+        Mock Invoke-PowerShell7MsixSwap { @{ Status = 'Kept'; Reason = 'ProvisionFailed' } }
+
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be 2
+    }
+
+    It 'Keeps the run''s exit code when the swap throws, and says PowerShell was left on the MSI' {
+        Mock Invoke-PowerShell7MsixSwap { throw 'boom' }
+
+        Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be 0
+
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'left on the MSI release' -and $Message -match 'boom' }
+    }
+}
+
+Describe 'Find-PowerShell7MsiProductCode (issue #333)' {
+    It 'Returns the product code of the Microsoft PowerShell 7 MSI under the machine Uninstall key' {
+        Mock Get-ChildItem {
+            @(
+                [pscustomobject]@{ PSPath = 'k1'; PSChildName = '{11111111-1111-1111-1111-111111111111}' },
+                [pscustomobject]@{ PSPath = 'k2'; PSChildName = '{2E334F2C-291A-46DA-9D05-1697F697E04D}' }
+            )
+        }
+        Mock Get-ItemProperty {
+            if ($LiteralPath -eq 'k1') { return [pscustomobject]@{ WindowsInstaller = 1; DisplayName = 'Git'; Publisher = 'The Git Development Community' } }
+            [pscustomobject]@{ WindowsInstaller = 1; DisplayName = 'PowerShell 7-x64'; Publisher = 'Microsoft Corporation' }
+        }
+
+        Find-PowerShell7MsiProductCode | Should -Be '{2E334F2C-291A-46DA-9D05-1697F697E04D}'
+    }
+
+    It 'Ignores a PowerShell entry another publisher made, or one Windows Installer does not own' {
+        Mock Get-ChildItem {
+            @(
+                [pscustomobject]@{ PSPath = 'k1'; PSChildName = '{11111111-1111-1111-1111-111111111111}' },
+                [pscustomobject]@{ PSPath = 'k2'; PSChildName = 'PowerShell7' }
+            )
+        }
+        Mock Get-ItemProperty {
+            if ($LiteralPath -eq 'k1') { return [pscustomobject]@{ WindowsInstaller = 1; DisplayName = 'PowerShell 7-x64'; Publisher = 'Someone Else' } }
+            [pscustomobject]@{ DisplayName = 'PowerShell 7-x64'; Publisher = 'Microsoft Corporation' }
+        }
+
+        Find-PowerShell7MsiProductCode | Should -BeNullOrEmpty
+    }
+
+    It 'Returns $null when the Uninstall key cannot be read' {
+        Mock Get-ChildItem { throw 'denied' }
+
+        Find-PowerShell7MsiProductCode | Should -BeNullOrEmpty
     }
 }
