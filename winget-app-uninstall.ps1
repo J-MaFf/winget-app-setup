@@ -5300,6 +5300,155 @@ function Invoke-PowerShell7BootstrapElevation {
     }
 }
 
+function Get-WingetLatestPackageVersion {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId
+    )
+
+    $run = Invoke-WingetProcess -ArgumentList (@('show', '--id', $PackageId, '--exact', '--source', 'winget') + @(Get-WingetAgreementArgs)) -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetListCheck) -Echo None
+    if ($run.LaunchFailed -or $run.TimedOut -or $run.ExitCode -ne 0) {
+        return $null
+    }
+    foreach ($line in @($run.Output)) {
+        if ([string]$line -match '^\s*Version:\s*(\d+(?:\.\d+){1,3})\s*$') {
+            return [version]$Matches[1]
+        }
+    }
+    return $null
+}
+
+function Find-PowerShell7MsiProductCode {
+    $uninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    try {
+        foreach ($entry in @(Get-ChildItem -LiteralPath $uninstallKey -ErrorAction Stop)) {
+            $properties = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction SilentlyContinue
+            if (-not $properties -or $properties.WindowsInstaller -ne 1) {
+                continue
+            }
+            if ([string]$properties.DisplayName -notlike 'PowerShell 7*' -or [string]$properties.Publisher -ne 'Microsoft Corporation') {
+                continue
+            }
+            if ($entry.PSChildName -match '^\{[0-9A-Fa-f-]{36}\}$') {
+                return $entry.PSChildName
+            }
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
+function Register-PowerShell7MsixForCurrentUser {
+    try {
+        Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.PowerShell_8wekyb3d8bbwe' -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-WarningMessage "The PowerShell 7 MSIX could not be registered for this account: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Find-PowerShell7MsixExecutable {
+    try {
+        $package = Get-AppxPackage -Name 'Microsoft.PowerShell' -ErrorAction Stop | Select-Object -First 1
+    }
+    catch {
+        return $null
+    }
+    if (-not $package) {
+        return $null
+    }
+    if ($env:LOCALAPPDATA) {
+        $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'
+        if (Test-Path -LiteralPath $alias -PathType Leaf) {
+            return $alias
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$package.InstallLocation)) {
+        return $null
+    }
+    $path = Join-Path $package.InstallLocation 'pwsh.exe'
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        return $path
+    }
+    return $null
+}
+
+function Get-PowerShell7ExecutableVersion {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        $reportedText = & $Path -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()' 2>$null
+        if ([string]($reportedText | Select-Object -Last 1) -match '^(\d+\.\d+\.\d+)') {
+            return [version]$Matches[1]
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
+function Invoke-PowerShell7MsixSwap {
+    param (
+        [Parameter(Mandatory = $true)]
+        [version]$LatestVersion,
+
+        [Parameter(Mandatory = $false)]
+        [string]$LogDirectory
+    )
+
+    $manualSteps = 'To move to it by hand, from an elevated Windows PowerShell: winget uninstall --id Microsoft.PowerShell --exact, then winget install --id Microsoft.PowerShell --exact.'
+
+    if (Test-IsSystemAccount) {
+        Write-WarningMessage ("PowerShell {0} is available, but this run is SYSTEM, which cannot run the MSIX build, so PowerShell 7 stays on the MSI release. {1}" -f $LatestVersion, $manualSteps)
+        return @{ Status = 'Kept'; Reason = 'SystemAccount' }
+    }
+
+    Write-Info ("PowerShell {0} ships only as an MSIX, so the PowerShell 7 MSI this run installed is replaced with it." -f $LatestVersion)
+    $provision = Install-MsixProvisionedPackage -PackageId 'Microsoft.PowerShell' -VerifyNameLike 'Microsoft.PowerShell'
+    if (-not $provision.Installed) {
+        Write-WarningMessage "PowerShell $LatestVersion could not be provisioned, so PowerShell 7 stays on the MSI release. $manualSteps"
+        return @{ Status = 'Kept'; Reason = 'ProvisionFailed' }
+    }
+    if (-not (Register-PowerShell7MsixForCurrentUser)) {
+        Write-WarningMessage "PowerShell $LatestVersion is provisioned but not registered for this account, so the MSI is kept. Sign out and back in, then remove the MSI with: winget uninstall --id Microsoft.PowerShell --exact"
+        return @{ Status = 'Kept'; Reason = 'RegisterFailed' }
+    }
+    $msixPwsh = Find-PowerShell7MsixExecutable
+    $reportedVersion = $null
+    if ($msixPwsh) {
+        $reportedVersion = Get-PowerShell7ExecutableVersion -Path $msixPwsh
+    }
+    if (-not $reportedVersion -or $reportedVersion -lt $LatestVersion) {
+        Write-WarningMessage "The PowerShell $LatestVersion MSIX did not start and report that version, so the MSI is kept. $manualSteps"
+        return @{ Status = 'Kept'; Reason = 'VerifyFailed' }
+    }
+
+    $productCode = Find-PowerShell7MsiProductCode
+    if (-not $productCode) {
+        Write-WarningMessage "PowerShell $LatestVersion is installed, but the PowerShell 7 MSI's product code was not found, so the MSI is left as it is. Remove it from Apps > Installed apps."
+        return @{ Status = 'Kept'; Reason = 'MsiNotFound' }
+    }
+    $msiArguments = '/x {0} /qn /norestart' -f $productCode
+    if ($LogDirectory) {
+        $msiArguments += ' /l*v "{0}"' -f (Join-Path $LogDirectory ('pwsh-msi-remove-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss')))
+    }
+    $removal = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $msiArguments -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetInstall)
+    if ($removal.LaunchFailed -or $removal.TimedOut -or @(0, 3010, 1605) -notcontains $removal.ExitCode) {
+        Write-WarningMessage "The PowerShell 7 MSI could not be removed (msiexec exit code $($removal.ExitCode)), so the MSI and the MSIX are both installed. Remove the MSI from Apps > Installed apps."
+        return @{ Status = 'Kept'; Reason = 'UninstallFailed' }
+    }
+    Write-Success "PowerShell 7 is now $LatestVersion (MSIX, provisioned for every user). Open a new window to use it."
+    return @{ Status = 'Swapped'; Reason = $null }
+}
+
 function Invoke-PowerShell7Bootstrap {
     param (
         [Parameter(Mandatory = $false)]
@@ -5354,6 +5503,7 @@ function Invoke-PowerShell7Bootstrap {
     }
 
     $pwshPath = Find-PowerShell7
+    $bootstrapInstalledPowerShell7 = $false
 
     if (-not $pwshPath) {
         if ($WhatIf) {
@@ -5426,6 +5576,7 @@ function Invoke-PowerShell7Bootstrap {
             return 7
         }
         Write-Success 'PowerShell 7 is installed.'
+        $bootstrapInstalledPowerShell7 = $true
     }
 
     $relaunchFile = Get-PowerShell7RelaunchFile -CommandPath $CommandPath -InstallerUrl $InstallerUrl -ExpectedBuildId $ExpectedBuildId -PowerShell7Installed
@@ -5471,6 +5622,22 @@ function Invoke-PowerShell7Bootstrap {
     $script:PowerShell7BootstrapRelaunched = $true
     Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f $relaunchProcess.ExitCode)
     $relaunchExitCode = $relaunchProcess.ExitCode
+
+    if ($bootstrapInstalledPowerShell7) {
+        try {
+            $latestVersion = Get-WingetLatestPackageVersion -PackageId 'Microsoft.PowerShell'
+            if ($latestVersion) {
+                $latestVersion = [version]('{0}.{1}.{2}' -f $latestVersion.Major, $latestVersion.Minor, [Math]::Max(0, $latestVersion.Build))
+                $stopgapVersion = Get-PowerShell7ExecutableVersion -Path $pwshPath
+                if ($stopgapVersion -and $latestVersion -gt $stopgapVersion) {
+                    [void](Invoke-PowerShell7MsixSwap -LatestVersion $latestVersion -LogDirectory $LogDirectory)
+                }
+            }
+        }
+        catch {
+            Write-WarningMessage "PowerShell 7 was left on the MSI release: the check for a newer release failed ($($_.Exception.Message))."
+        }
+    }
     if ($script:PowerShell7BootstrapRestartRequired) {
         Write-WarningMessage 'Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.'
         if ($relaunchExitCode -eq 0) {
